@@ -115,11 +115,15 @@ export function TunGate({ proxyUrl, tunnelUrl, exitIp, onReady, isReconnect, onR
       console.log(`[TunGate:${id}] startTun result: success=${startResult.success}, error=${startResult.error}`)
       if (!startResult.success) {
         setPhase('failed')
-        const isAuth = startResult.error?.includes('AUTH_DENIED')
-        setIsAuthDenied(!!isAuth)
+        const errMsg = startResult.error || ''
+        const isAuth = errMsg.includes('AUTH_DENIED')
+        const isOrphan = errMsg.includes('ORPHAN_PROCESS')
+        setIsAuthDenied(isAuth || isOrphan)
         setError(isAuth
           ? 'macOS requires administrator password to start the secure tunnel. Click Retry and enter your Mac login password when prompted.'
-          : (startResult.error ?? 'Failed to start TUN'))
+          : isOrphan
+            ? 'A previous tunnel process is still running and could not be terminated (last admin prompt was denied). Click Retry to authorize again.'
+            : (errMsg || 'Failed to start TUN'))
         return
       }
 

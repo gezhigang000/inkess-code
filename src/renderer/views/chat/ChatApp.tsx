@@ -77,8 +77,8 @@ export function ChatApp() {
                   if (btn.title === 'Close') (e.currentTarget as HTMLButtonElement).style.color = '#fff'
                 }}
                 onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLButtonElement).style.background = 'transparent'
-                  (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-secondary)'
+                  ;(e.currentTarget as HTMLButtonElement).style.background = 'transparent'
+                  ;(e.currentTarget as HTMLButtonElement).style.color = 'var(--text-secondary)'
                 }}
               >
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none"

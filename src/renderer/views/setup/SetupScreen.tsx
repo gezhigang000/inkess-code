@@ -251,6 +251,20 @@ export async function startInstall(): Promise<boolean> {
   const info = await window.api.cli.getInfo()
   setCliInfo(info.installed, info.version)
 
+  // Install codex CLI in the background — best effort; if it fails the user
+  // can still use Claude and we'll retry on next launch. Don't block the
+  // setup flow on it (bandwidth-heavy: ~200MB binary).
+  void (async () => {
+    try {
+      const cur = await window.api.cli.getInfo('codex')
+      if (cur.installed) return
+      const r = await window.api.cli.install('codex')
+      if (!r.success) console.warn('[setup] codex install failed (non-fatal):', r.error)
+    } catch (err) {
+      console.warn('[setup] codex install threw (non-fatal):', err)
+    }
+  })()
+
   // CLI done — now install dev tools
   setInstallProgress(62)
   setInstallSteps([

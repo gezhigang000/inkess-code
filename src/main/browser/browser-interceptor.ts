@@ -168,12 +168,13 @@ export class BrowserInterceptor {
     writeFileSync(join(this.zdotdir, '.zshrc'),
       `[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc"\n` +
       '# --- Post-init isolation (user .zshrc may have overridden our env) ---\n' +
-      '# 1. Re-strip ANTHROPIC_*/CLAUDE_* that user\'s .zshrc may have re-set\n' +
-      'for __k in $(env 2>/dev/null | grep -oE \'^(ANTHROPIC|CLAUDE)_[^=]*\'); do\n' +
+      '# 1. Re-strip ANTHROPIC_*/CLAUDE_*/OPENAI_* that user\'s .zshrc may have re-set\n' +
+      'for __k in $(env 2>/dev/null | grep -oE \'^(ANTHROPIC|CLAUDE|OPENAI)_[^=]*\'); do\n' +
       '  unset "$__k" 2>/dev/null\n' +
       'done; unset __k\n' +
-      `# 2. Re-inject our isolated CLAUDE_CONFIG_DIR\n` +
+      `# 2. Re-inject our isolated CLAUDE_CONFIG_DIR + CODEX_HOME\n` +
       `[ -n "$__INKESS_CLAUDE_CONFIG_DIR" ] && export CLAUDE_CONFIG_DIR="$__INKESS_CLAUDE_CONFIG_DIR"\n` +
+      `[ -n "$__INKESS_CODEX_HOME" ] && export CODEX_HOME="$__INKESS_CODEX_HOME"\n` +
       `# 3. Re-apply region env (user's .zshrc may have set TZ/LANG to local values)\n` +
       'if [ -n "$__INKESS_REGION_ENV" ]; then\n' +
       '  IFS=\'|\' read -rA __pairs <<< "$__INKESS_REGION_ENV"\n' +
@@ -181,8 +182,13 @@ export class BrowserInterceptor {
       '    export "${__p%%=*}=${__p#*=}"\n' +
       '  done; unset __pairs __p\n' +
       'fi\n' +
-      `# 4. Re-prepend Inkess bin dir (path_helper moved it to end)\n` +
+      `# 4. Re-prepend Inkess bin dirs (path_helper moved them to end).\n` +
+      `#    INKESS_BIN_DIR holds the open/browser-open wrapper; engine bin dirs\n` +
+      `#    hold the active claude/codex binaries.\n` +
       `[ -n "$INKESS_BIN_DIR" ] && export PATH="$INKESS_BIN_DIR:$PATH"\n` +
+      `if [ -n "$__INKESS_ENGINE_BIN_DIRS" ]; then\n` +
+      `  export PATH="$__INKESS_ENGINE_BIN_DIRS:$PATH"\n` +
+      `fi\n` +
       `hash -r\n` +
       `# 5. Clean up internal vars (keep INKESS_BROWSER_SOCK for open wrapper)\n` +
       'for __k in $(env 2>/dev/null | grep -oE \'^__INKESS_[^=]*\'); do unset "$__k" 2>/dev/null; done; unset __k\n' +
@@ -253,13 +259,20 @@ done
 
   private createWindowsWrappers(): void {
     // browser-open.cmd: used as BROWSER env var value on Windows
-    // Sends URL to TCP localhost server, falls back to system start
+    // Sends URL to TCP localhost server, falls back to system start.
+    //
+    // We pass the URL to PowerShell via an environment variable rather than
+    // inline %URL% expansion. OAuth URLs are full of percent-encoded chars
+    // (%2F, %3D, %26, etc.) and CMD's "delayed expansion" + `%X%` substitution
+    // strips/duplicates them, so the URL that reaches PowerShell would be
+    // mangled. `set` followed by `$env:VAR` in PowerShell is byte-safe.
     const browserOpenCmd = `@echo off
 setlocal
 set "URL=%~1"
 if "%URL%"=="" exit /b 0
 if "%INKESS_BROWSER_PORT%"=="" goto :fallback
-powershell -NoProfile -Command "$c=[System.Net.Sockets.TcpClient]::new();try{$c.Connect('127.0.0.1',%INKESS_BROWSER_PORT%);$s=$c.GetStream();$b=[System.Text.Encoding]::UTF8.GetBytes('%URL%');$s.Write($b,0,$b.Length);$s.Close()}catch{}finally{$c.Dispose()}" 2>nul
+set "INKESS_OAUTH_URL=%URL%"
+powershell -NoProfile -Command "$c=[System.Net.Sockets.TcpClient]::new();try{$c.Connect('127.0.0.1',[int]$env:INKESS_BROWSER_PORT);$s=$c.GetStream();$b=[System.Text.Encoding]::UTF8.GetBytes($env:INKESS_OAUTH_URL);$s.Write($b,0,$b.Length);$s.Close()}catch{}finally{$c.Dispose()}" 2>nul
 exit /b 0
 :fallback
 start "" "%URL%"
@@ -267,6 +280,7 @@ start "" "%URL%"
     writeFileSync(join(this.binDir, 'browser-open.cmd'), browserOpenCmd)
 
     // open.cmd: intercepts `open URL` calls on Windows (Claude Code may call `open`)
+    // Same env-var-passing strategy as browser-open.cmd to preserve %-encoded URLs.
     const logPath = join(app.getPath('userData'), 'browser-intercept.log').replace(/\\/g, '\\\\')
     const openCmd = `@echo off
 setlocal enabledelayedexpansion
@@ -278,8 +292,9 @@ for %%a in (%*) do (
 )
 if "%URL%"=="" goto :passthrough
 if "%INKESS_BROWSER_PORT%"=="" goto :passthrough
-echo [%time%] intercept: %URL% port=%INKESS_BROWSER_PORT% >> "${logPath}" 2>nul
-powershell -NoProfile -Command "$c=[System.Net.Sockets.TcpClient]::new();try{$c.Connect('127.0.0.1',%INKESS_BROWSER_PORT%);$s=$c.GetStream();$b=[System.Text.Encoding]::UTF8.GetBytes('%URL%');$s.Write($b,0,$b.Length);$s.Close()}catch{}finally{$c.Dispose()}" 2>nul
+set "INKESS_OAUTH_URL=%URL%"
+echo [%time%] intercept: !URL! port=%INKESS_BROWSER_PORT% >> "${logPath}" 2>nul
+powershell -NoProfile -Command "$c=[System.Net.Sockets.TcpClient]::new();try{$c.Connect('127.0.0.1',[int]$env:INKESS_BROWSER_PORT);$s=$c.GetStream();$b=[System.Text.Encoding]::UTF8.GetBytes($env:INKESS_OAUTH_URL);$s.Write($b,0,$b.Length);$s.Close()}catch{}finally{$c.Dispose()}" 2>nul
 exit /b 0
 :passthrough
 start "" %*

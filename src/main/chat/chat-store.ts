@@ -47,11 +47,15 @@ export class ChatStore {
     return this.chats.find((c) => c.id === chatId)
   }
 
-  async create(customCwd?: string): Promise<ChatMeta> {
+  async create(opts?: string | { cwd?: string; engine?: 'claude' | 'codex' }): Promise<ChatMeta> {
+    // Backward compat: callers used to pass a bare cwd string.
+    const o: { cwd?: string; engine?: 'claude' | 'codex' } =
+      typeof opts === 'string' ? { cwd: opts } : (opts ?? {})
+
     const id = randomUUID()
     const dataDir = join(this.workspaceDir, id)
     mkdirSync(dataDir, { recursive: true })
-    const cwd = customCwd || dataDir
+    const cwd = o.cwd || dataDir
 
     const now = Date.now()
     const meta: ChatMeta = {
@@ -65,6 +69,7 @@ export class ChatStore {
       cliVersion: this.cliVersion,
       messageCount: 0,
       starred: false,
+      engine: o.engine === 'codex' ? 'codex' : 'claude',
     }
     this.chats.unshift(meta)
     await this.writeIndex()

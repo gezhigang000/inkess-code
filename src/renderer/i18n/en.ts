@@ -1,6 +1,6 @@
 export const en = {
   // App
-  'app.title': 'Inkess Claude Code Pro',
+  'app.title': 'Inkess Code',
   'app.connected': 'Connected',
 
   // Tab context menu
@@ -12,11 +12,11 @@ export const en = {
 
   // Setup
   'setup.checking': 'Checking environment...',
-  'setup.settingUp': 'Setting up Claude Code Pro',
-  'setup.verifying': 'Verifying Claude Code Pro',
+  'setup.settingUp': 'Setting up Claude Code',
+  'setup.verifying': 'Verifying Claude Code',
   'setup.firstTime': 'First-time setup — this only takes a moment',
   'setup.checkEnv': 'Checking environment',
-  'setup.downloading': 'Downloading Claude Code Pro...',
+  'setup.downloading': 'Downloading Claude Code...',
   'setup.verifyInstall': 'Verifying installation',
   'setup.downloadComplete': 'Download complete',
   'setup.verifyingInstall': 'Verifying installation...',
@@ -123,7 +123,7 @@ export const en = {
   'sidebar.recentProjects': 'Recent Projects',
   'sidebar.noProjects': 'No projects yet',
   'sidebar.settings': 'Settings',
-  'sidebar.cliStatus': 'Claude Code Pro',
+  'sidebar.cliStatus': 'Claude Code',
   'sidebar.sessions': 'Sessions',
   'sidebar.active': 'Active',
   'sidebar.recent': 'Recent',

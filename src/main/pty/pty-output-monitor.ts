@@ -85,19 +85,19 @@ export class PtyOutputMonitor extends EventEmitter {
       this.emit('activity', { id, type: 'mode-change', payload: mode } as PtyActivityEvent)
     }
 
-    // Detect URLs that Claude Code tries to auto-open (e.g. OAuth login)
-    // On Windows, `start` is a cmd builtin that can't be intercepted via PATH,
-    // so we detect the URL in PTY output and open it in the built-in browser.
-    // Use the accumulated buffer (not just current chunk) because long URLs
-    // like OAuth URLs may arrive split across multiple PTY data events.
+    // Detect URLs that Claude Code / Codex try to auto-open (e.g. OAuth login).
+    // On Windows, `start` is a cmd builtin that can't be intercepted via PATH;
+    // and Codex on macOS calls LaunchServices directly (bypasses our open
+    // wrapper). In both cases we detect the URL in PTY output and route it
+    // to the built-in browser. Use the accumulated buffer (not just current
+    // chunk) because long URLs may arrive split across multiple PTY events.
     const cleanBuffer = PtyOutputMonitor.stripAnsi(session.buffer)
     const urlMatches = cleanBuffer.matchAll(/https?:\/\/[^\s"'<>)\]]+/g)
     for (const urlMatch of urlMatches) {
       const url = urlMatch[0]
-      // Only intercept URLs that look like they should open in a browser
-      // (OAuth, claude.ai, anthropic.com, etc.) — not API endpoints
-      // Dedup: don't open the same URL twice in one session
-      if (/claude\.ai|anthropic\.com|accounts\.google|github\.com\/login/i.test(url) &&
+      // Open URLs that look like login/OAuth flows in the built-in browser.
+      // Dedup: don't open the same URL twice in one session.
+      if (/claude\.ai|anthropic\.com|accounts\.google|github\.com\/login|chatgpt\.com\/(auth|backend-api)|chat\.openai\.com\/auth|auth\.openai\.com|auth0\.openai\.com|platform\.openai\.com\/login/i.test(url) &&
           !session.openedUrls.has(url)) {
         session.openedUrls.add(url)
         this.emit('activity', { id, type: 'url-open', payload: url } as PtyActivityEvent)

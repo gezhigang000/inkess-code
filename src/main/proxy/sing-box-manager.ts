@@ -539,20 +539,45 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
       }
     }
 
-    // Kill the actual sing-box root process via PID file
+    // Kill the actual sing-box root process via PID file.
+    //
+    // Failure handling: if the user denies the macOS sudo prompt during SIGTERM
+    // we MUST NOT escalate to SIGKILL — that triggers a second osascript dialog
+    // (and a third if startTun follows). Past behavior: three back-to-back deny
+    // prompts on a single reconnect, then a bogus "confirmed dead" log + status
+    // reset to 'stopped' even when the orphan was still alive. That left the
+    // state machine lying to itself and the next startTun racing the orphan
+    // for the TUN interface.
     const pid = this.readPidFile()
     if (pid > 0 && this.isProcessAlive(pid)) {
       log.info(`[sing-box] stopping pid=${pid} with SIGTERM...`)
+      const authDeniedBefore = this._authDeniedAt
       this.killProcess(pid, 'TERM')
       const dead = await this.waitForProcessDeath(pid, 5000)
 
       if (!dead) {
-        log.warn(`[sing-box] pid=${pid} still alive after SIGTERM, sending SIGKILL`)
-        this.killProcess(pid, 'KILL')
-        const killed = await this.waitForProcessDeath(pid, 3000)
-        if (!killed) {
-          log.error(`[sing-box] FAILED to kill pid=${pid} — process may be orphaned`)
+        // Skip SIGKILL escalation when SIGTERM's sudo prompt was denied —
+        // a second prompt within seconds will be auto-denied by macOS's
+        // cached deny anyway, and just spams the user with dialogs.
+        const authDeniedDuringTerm = this._authDeniedAt > authDeniedBefore
+        if (authDeniedDuringTerm) {
+          log.warn(`[sing-box] pid=${pid} still alive but sudo was denied — skipping SIGKILL to avoid prompt loop`)
+        } else {
+          log.warn(`[sing-box] pid=${pid} still alive after SIGTERM, sending SIGKILL`)
+          this.killProcess(pid, 'KILL')
+          await this.waitForProcessDeath(pid, 3000)
         }
+      }
+
+      // Verify actual death before cleaning up state. If the orphan is still
+      // alive, leave the PID file in place and surface the failure so callers
+      // (reconnect / startTun) bail out instead of racing the orphan.
+      if (this.isProcessAlive(pid)) {
+        log.error(`[sing-box] FAILED to kill pid=${pid} — leaving PID file, marking error`)
+        this._status = 'error'
+        this._lastError = `ORPHAN_PROCESS: previous sing-box (pid=${pid}) is still running and could not be terminated`
+        this.emitStatus(null, this._lastError)
+        throw new Error(this._lastError)
       }
       log.info(`[sing-box] pid=${pid} confirmed dead`)
     }
@@ -679,6 +704,17 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
       return { success: true }
     } catch (err) {
       const error = (err as Error).message
+      // If the start failed AFTER we wrote the config / kicked off sudo, the
+      // half-baked attempt may have left a utun interface or split route on
+      // the system (especially when sing-box exited mid-init). Schedule a
+      // best-effort cleanup so the next retry starts clean instead of
+      // racing the residual.
+      try {
+        if (os.platform() !== 'win32' && this.detectStaleNetworkState().hasResiduals) {
+          this._hasStaleNetworkState = true
+          log.warn('[sing-box] startTun failed — stale network state detected, will clean on next attempt')
+        }
+      } catch { /* ignore — detection is best-effort */ }
       this.emitStatus(null, error)
       return { error }
     }

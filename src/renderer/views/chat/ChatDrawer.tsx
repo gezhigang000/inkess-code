@@ -23,18 +23,20 @@ export function ChatDrawer({ onClose }: Props) {
   const loadChatList = useChatStore((s) => s.loadChatList)
 
   const [listOpen, setListOpen] = useState(false)
+  const [newMenuOpen, setNewMenuOpen] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<ChatMeta | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const newMenuRef = useRef<HTMLDivElement>(null)
   const creatingRef = useRef(false)
 
-  const createNewChat = useCallback(async () => {
+  const createNewChat = useCallback(async (engine: 'claude' | 'codex' = 'claude') => {
     if (creatingRef.current) return
     creatingRef.current = true
     try {
       const { tabs, activeTabId } = useTerminalStore.getState()
       const tab = tabs.find((t) => t.id === activeTabId)
       const cwd = tab?.cwd || window.api?.homedir || '/'
-      const meta = await window.api.chat.create(cwd)
+      const meta = await window.api.chat.create(cwd, engine)
       await loadChatList()
       selectChat(meta.id)
       setListOpen(false)
@@ -61,6 +63,18 @@ export function ChatDrawer({ onClose }: Props) {
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [listOpen])
+
+  // Close new-chat menu when clicking outside
+  useEffect(() => {
+    if (!newMenuOpen) return
+    const handler = (e: MouseEvent) => {
+      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) {
+        setNewMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [newMenuOpen])
 
   // Escape closes list popover first, then drawer
   useEffect(() => {
@@ -138,23 +152,60 @@ export function ChatDrawer({ onClose }: Props) {
           {activeChatId ? chatTitle : 'Chat'}
         </div>
 
-        {/* New chat */}
-        <button
-          onClick={createNewChat}
-          title="New chat"
-          style={{
-            width: 28, height: 28, border: 'none', borderRadius: 4,
-            background: 'transparent', color: 'var(--text-secondary)',
-            cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}
-          onMouseEnter={(e) => (e.currentTarget).style.background = 'var(--bg-hover)'}
-          onMouseLeave={(e) => (e.currentTarget).style.background = 'transparent'}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-            stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-        </button>
+        {/* New chat — split menu (Claude / Codex) */}
+        <div ref={newMenuRef} style={{ position: 'relative' }}>
+          <button
+            onClick={() => setNewMenuOpen((v) => !v)}
+            title="New chat"
+            style={{
+              width: 28, height: 28, border: 'none', borderRadius: 4,
+              background: 'transparent', color: 'var(--text-secondary)',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+            onMouseEnter={(e) => (e.currentTarget).style.background = 'var(--bg-hover)'}
+            onMouseLeave={(e) => (e.currentTarget).style.background = 'transparent'}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
+          {newMenuOpen && (
+            <div
+              style={{
+                position: 'absolute', top: 32, right: 0, minWidth: 160,
+                background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                borderRadius: 6, padding: 4, zIndex: 30,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+              }}
+            >
+              <button
+                onClick={() => { setNewMenuOpen(false); void createNewChat('claude') }}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left',
+                  padding: '6px 10px', border: 'none', background: 'transparent',
+                  color: 'var(--text-primary)', fontSize: 13, cursor: 'pointer', borderRadius: 4,
+                }}
+                onMouseEnter={(e) => (e.currentTarget).style.background = 'var(--bg-hover)'}
+                onMouseLeave={(e) => (e.currentTarget).style.background = 'transparent'}
+              >
+                + New Claude chat
+              </button>
+              <button
+                onClick={() => { setNewMenuOpen(false); void createNewChat('codex') }}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left',
+                  padding: '6px 10px', border: 'none', background: 'transparent',
+                  color: 'var(--text-primary)', fontSize: 13, cursor: 'pointer', borderRadius: 4,
+                }}
+                onMouseEnter={(e) => (e.currentTarget).style.background = 'var(--bg-hover)'}
+                onMouseLeave={(e) => (e.currentTarget).style.background = 'transparent'}
+              >
+                + New Codex chat
+              </button>
+            </div>
+          )}
+        </div>
 
         {/* Close */}
         <button
@@ -191,9 +242,20 @@ export function ChatDrawer({ onClose }: Props) {
             borderTop: '1px solid var(--border)',
           }}
         >
-          {/* New chat button */}
+          {/* New chat buttons — one per engine */}
           <div
-            onClick={createNewChat}
+            onClick={() => void createNewChat('claude')}
+            style={{
+              padding: '10px 12px', cursor: 'pointer', fontSize: 13,
+              color: 'var(--accent)', fontWeight: 500,
+            }}
+            onMouseEnter={(e) => (e.currentTarget).style.background = 'var(--bg-hover)'}
+            onMouseLeave={(e) => (e.currentTarget).style.background = 'transparent'}
+          >
+            + New Claude chat
+          </div>
+          <div
+            onClick={() => void createNewChat('codex')}
             style={{
               padding: '10px 12px', cursor: 'pointer', fontSize: 13,
               color: 'var(--accent)', fontWeight: 500,
@@ -202,7 +264,7 @@ export function ChatDrawer({ onClose }: Props) {
             onMouseEnter={(e) => (e.currentTarget).style.background = 'var(--bg-hover)'}
             onMouseLeave={(e) => (e.currentTarget).style.background = 'transparent'}
           >
-            + New chat
+            + New Codex chat
           </div>
 
           {groups.length === 0 && (

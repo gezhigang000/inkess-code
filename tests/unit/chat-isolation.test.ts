@@ -33,7 +33,7 @@ describe('initChatMode extraction', () => {
     // Extract the function body
     const fnStart = indexTs.indexOf('async function initChatMode')
     expect(fnStart).toBeGreaterThan(-1)
-    const fnBody = indexTs.slice(fnStart, fnStart + 2000)
+    const fnBody = indexTs.slice(fnStart, fnStart + 4000)
     expect(fnBody).toMatch(/try\s*\{/)
     expect(fnBody).toMatch(/\} catch \(err\)/)
     expect(fnBody).toMatch(/log\.error\('\[chat\] init failed/)
@@ -141,7 +141,7 @@ describe('ChatSidebar createNew error handling', () => {
   const sidebarTsx = read('src/renderer/views/chat/sidebar/ChatSidebar.tsx')
 
   it('wraps createNew in try/catch', () => {
-    expect(sidebarTsx).toMatch(/const createNew = async \(\) => \{/)
+    expect(sidebarTsx).toMatch(/const createNew = async \(engine: 'claude' \| 'codex' = 'claude'\) => \{/)
     expect(sidebarTsx).toMatch(/try \{/)
     expect(sidebarTsx).toMatch(/\} catch \(err\)/)
   })

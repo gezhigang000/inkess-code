@@ -1,18 +1,21 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { randomUUID } from 'crypto'
+import { existsSync } from 'fs'
+import { join } from 'path'
+import * as os from 'os'
 import log from '../logger'
 import { buildCleanEnv } from '../utils/clean-env'
 import { StreamJsonParser } from './stream-parser'
-import { normalize } from './normalizer'
-import { buildArgs } from './sandbox'
+import { getEngineHandler, type Engine } from './engines'
 import type { ChatStore } from './chat-store'
 import type { ChatEndPayload, ChatStreamPayload } from './chat-types'
 import { CANCEL_GRACE_MS, MAX_CONCURRENT, TURN_TIMEOUT_MS } from './constants'
 
 export interface ChatManagerDeps {
   store: ChatStore
-  /** Returns absolute path to the `claude` binary. Throws if not installed. */
-  getCliBinaryPath: () => string
+  /** Returns absolute path to the CLI binary for the requested engine.
+   *  Returns empty string if not installed. */
+  getCliBinaryPath: (engine: Engine) => string
   /**
    * Optional args to prepend before the normal buildArgs output. Used by
    * tests to invoke `node fake-claude.mjs <args>` where the binary is 'node'
@@ -57,12 +60,32 @@ export class ChatManager {
     const meta = this.deps.store.get(chatId)
     if (!meta) throw new Error('invalid_chat_id')
 
-    const binary = this.deps.getCliBinaryPath()
+    const engine: Engine = meta.engine === 'codex' ? 'codex' : 'claude'
+    const handler = getEngineHandler(engine)
+
+    const binary = this.deps.getCliBinaryPath(engine)
     if (!binary) throw new Error('cli_missing')
 
-    const baseArgs = buildArgs({ meta, text })
+    const baseArgs = handler.buildArgs({ meta, text })
     const args = [...(this.deps.argsPrefix ?? []), ...baseArgs]
     const env = buildCleanEnv(this.deps.regionEnv(), this.deps.extraEnv())
+
+    // Codex pre-flight: `codex exec` requires an auth file. Codex stores it at
+    // $CODEX_HOME/auth.json (defaulting to ~/.codex/auth.json). We check both
+    // locations so the friendly `codex_not_logged_in` error fires regardless
+    // of how the user logged in (terminal with our isolated CODEX_HOME, or a
+    // pre-existing system-wide login at ~/.codex/auth.json).
+    if (engine === 'codex') {
+      const candidates: string[] = []
+      if (env.CODEX_HOME) candidates.push(join(env.CODEX_HOME, 'auth.json'))
+      candidates.push(join(os.homedir(), '.codex', 'auth.json'))
+      const hasAuth = candidates.some((p) => {
+        try { return existsSync(p) } catch { return false }
+      })
+      if (!hasAuth) {
+        throw new Error('codex_not_logged_in')
+      }
+    }
 
     let child: ChildProcess
     try {
@@ -82,7 +105,7 @@ export class ChatManager {
 
     const emitParsed = (objects: unknown[]) => {
       for (const raw of objects) {
-        const events = normalize(raw)
+        const events = handler.normalize(raw)
         for (const event of events) {
           if (event.kind === 'meta' && event.sessionId) {
             sessionFromInit = event.sessionId
@@ -202,6 +225,13 @@ export class ChatManager {
   }
 
   private killChild(rec: Inflight): void {
+    // Note on Windows: Node's child.kill('SIGTERM') is internally translated
+    // to TerminateProcess(), which is equivalent to SIGKILL — there is no
+    // graceful-exit signal for non-GUI processes. The CANCEL_GRACE_MS delay
+    // and SIGKILL escalation below are therefore no-ops on Windows but harmless.
+    // Callers that need to flush filesystem state (e.g. before deleting a
+    // chat's cwd) should use cancelAndWait() and accept that codex on Windows
+    // cannot run cleanup handlers.
     try {
       rec.child.kill('SIGTERM')
     } catch {

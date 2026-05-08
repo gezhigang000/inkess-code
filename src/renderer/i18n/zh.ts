@@ -2,7 +2,7 @@ import type { TranslationKey } from './en'
 
 export const zh: Record<TranslationKey, string> = {
   // App
-  'app.title': 'Inkess Claude Code Pro',
+  'app.title': 'Inkess Code',
   'app.connected': '已连接',
 
   // Tab context menu
@@ -14,11 +14,11 @@ export const zh: Record<TranslationKey, string> = {
 
   // Setup
   'setup.checking': '检查环境中...',
-  'setup.settingUp': '正在安装 Claude Code Pro',
-  'setup.verifying': '正在验证 Claude Code Pro',
+  'setup.settingUp': '正在安装 Claude Code',
+  'setup.verifying': '正在验证 Claude Code',
   'setup.firstTime': '首次安装 — 只需片刻',
   'setup.checkEnv': '检查环境',
-  'setup.downloading': '下载 Claude Code Pro...',
+  'setup.downloading': '下载 Claude Code...',
   'setup.verifyInstall': '验证安装',
   'setup.downloadComplete': '下载完成',
   'setup.verifyingInstall': '正在验证安装...',
@@ -125,7 +125,7 @@ export const zh: Record<TranslationKey, string> = {
   'sidebar.recentProjects': '最近项目',
   'sidebar.noProjects': '暂无项目',
   'sidebar.settings': '设置',
-  'sidebar.cliStatus': 'Claude Code Pro',
+  'sidebar.cliStatus': 'Claude Code',
   'sidebar.sessions': '会话',
   'sidebar.active': '活跃',
   'sidebar.recent': '最近',

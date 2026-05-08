@@ -21,10 +21,12 @@ export interface ChatMeta {
   updatedAt: number                       // last message time
   cwd: string                             // absolute path to this chat's workspace
   mountedDirs: string[]                   // user-granted extra directories
-  claudeSessionId: string | null          // populated after first turn
+  claudeSessionId: string | null          // populated after first turn (Claude) / thread id (Codex)
   cliVersion: string                      // CLI version at creation time
   messageCount: number
   starred: boolean                        // reserved for v0.2+
+  /** Backend engine. Optional for forward-compat with older chats — defaults to 'claude'. */
+  engine?: 'claude' | 'codex'
 }
 
 export interface ConsentLog {
@@ -80,7 +82,8 @@ export interface SearchHit {
 export type ChatErrorCode =
   | 'busy'                                // single-chat in-flight lock
   | 'too_many_concurrent_chats'           // global N=5 limit
-  | 'cli_missing'                         // claude binary not installed
+  | 'cli_missing'                         // claude/codex binary not installed
+  | 'codex_not_logged_in'                 // $CODEX_HOME/auth.json missing — run `codex login`
   | 'spawn_failed'                        // ENOENT / EACCES on spawn
   | 'cancelled'                           // user hit cancel
   | 'timeout'                             // 600s watchdog fired

@@ -424,11 +424,11 @@ function AboutSection() {
       <SettingsGroup title={t('settings.version')}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 10px', background: 'var(--bg-tertiary)', borderRadius: 6 }}>
-            <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Inkess Claude Code Pro</span>
+            <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Inkess Code</span>
             <span style={{ fontSize: 13, color: 'var(--text-primary)', fontFamily: 'var(--font-mono, monospace)' }}>v{appVersion}</span>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 10px', background: 'var(--bg-tertiary)', borderRadius: 6 }}>
-            <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Claude Code Pro</span>
+            <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Claude Code</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: 13, color: 'var(--text-primary)', fontFamily: 'var(--font-mono, monospace)' }}>{cliVersion ? `v${cliVersion}` : '—'}</span>
               <button

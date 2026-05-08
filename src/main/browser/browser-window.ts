@@ -375,7 +375,7 @@ async function createTab(url: string, config: BrowserConfig): Promise<TabInfo> {
   // Set language header + mask Electron/app from User-Agent
   const cleanUA = view.webContents.getUserAgent()
     .replace(/\s*Electron\/\S+/g, '')
-    .replace(/\s*inkess-claude-code-pro\/\S+/g, '')
+    .replace(/\s*inkess-code\/\S+/g, '')
   // Set on webContents (not session) to avoid mutating shared persist:claude session
   view.webContents.setUserAgent(cleanUA)
 

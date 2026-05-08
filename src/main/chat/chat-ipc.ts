@@ -40,9 +40,10 @@ export function registerChatIPC(deps: ChatIpcDeps): void {
   })
 
   ipcMain.handle('chat:create', async (_event, args?: unknown) => {
-    const a = args as { cwd?: string } | undefined
+    const a = args as { cwd?: string; engine?: string } | undefined
     const cwd = typeof a?.cwd === 'string' && a.cwd.length > 0 ? a.cwd : undefined
-    const meta = await store.create(cwd)
+    const engine = a?.engine === 'codex' ? 'codex' : 'claude'
+    const meta = await store.create({ cwd, engine })
     broadcastListChanged()
     return meta
   })

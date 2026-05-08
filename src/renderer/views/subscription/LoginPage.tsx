@@ -85,7 +85,7 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
         </div>
 
         <h2 style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>
-          Inkess Claude Code Pro
+          Inkess Code
         </h2>
         <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 32 }}>
           {t('subscription.loginHint')}

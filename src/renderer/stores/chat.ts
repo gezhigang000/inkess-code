@@ -45,10 +45,11 @@ function errorMessageFor(code: string | undefined): string {
   switch (code) {
     case 'cancelled': return '✋ Cancelled.'
     case 'timeout':   return '⏱ Response timed out. Try again.'
-    case 'cli_missing': return '⚠️ Claude Code CLI is not installed. Install it first in CLI mode.'
+    case 'cli_missing': return '⚠️ CLI binary is not installed. Install it from the setup screen.'
+    case 'codex_not_logged_in': return '🔐 Codex is not logged in. Open a terminal and run `codex login --device-auth`, then try again.'
     case 'busy':      return '⚠️ A turn is already running for this chat.'
     case 'too_many_concurrent_chats': return '⚠️ Too many concurrent chats running. Cancel one and try again.'
-    case 'spawn_failed': return '⚠️ Failed to start Claude. Check logs.'
+    case 'spawn_failed': return '⚠️ Failed to start the CLI. Check logs.'
     default: return `⚠️ Error: ${code ?? 'unknown'}`
   }
 }

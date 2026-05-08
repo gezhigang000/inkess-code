@@ -54,7 +54,13 @@ if (MOCK_MODE) log.info('[startup] MOCK_MODE enabled — IPC handlers will retur
 let mainWindow: BrowserWindow | null = null
 const ptyManager = new PtyManager()
 const ptyMonitor = new PtyOutputMonitor()
-const cliManager = new CliManager()
+const cliManager = new CliManager('claude')
+const codexManager = new CliManager('codex')
+const cliManagers = { claude: cliManager, codex: codexManager } as const
+type CliEngine = keyof typeof cliManagers
+function pickCliManager(engine: unknown): CliManager {
+  return engine === 'codex' ? codexManager : cliManager
+}
 const chatStore = new ChatStore(app.getPath('userData'), '')  // cliVersion patched after app-ready
 let chatManager: ChatManager | null = null
 const toolsManager = new ToolsManager()
@@ -122,7 +128,7 @@ function createWindow(): void {
   }
 
   mainWindow = new BrowserWindow({
-    title: 'Inkess Claude Code Pro',
+    title: 'Inkess Code',
     width: 1100,
     height: 700,
     minWidth: 800,
@@ -179,42 +185,47 @@ function createWindow(): void {
 }
 
 // IPC: CLI Manager
-ipcMain.handle('cli:getInfo', () => {
-  if (MOCK_MODE) return { installed: true, path: '/usr/bin/claude', version: '2.1.98' }
-  return cliManager.getInfo()
+//
+// IPC handlers accept an optional `engine: 'claude' | 'codex'` parameter
+// (defaults to 'claude' for backward compatibility with existing callers).
+ipcMain.handle('cli:getInfo', (_event, engine?: CliEngine) => {
+  if (MOCK_MODE) return { installed: true, path: '/usr/bin/claude', version: '2.1.98', engine: engine || 'claude' }
+  return pickCliManager(engine).getInfo()
 })
 
-ipcMain.handle('cli:install', async () => {
+ipcMain.handle('cli:install', async (_event, engine?: CliEngine) => {
+  const mgr = pickCliManager(engine)
   try {
-    await cliManager.install((step, progress) => {
-      safeSend('cli:installProgress', { step, progress })
+    await mgr.install((step, progress) => {
+      safeSend('cli:installProgress', { step, progress, engine: mgr.engine })
     })
-    analytics.track('cli_install')
+    analytics.track('cli_install', { engine: mgr.engine })
     statsCollector.logEvent('cli:install')
     return { success: true }
   } catch (err) {
-    log.error('CLI install failed:', err)
+    log.error(`CLI[${mgr.engine}] install failed:`, err)
     return { success: false, error: (err as Error).message }
   }
 })
 
-ipcMain.handle('cli:listVersions', async () => {
-  return cliManager.listVersions()
+ipcMain.handle('cli:listVersions', async (_event, engine?: CliEngine) => {
+  return pickCliManager(engine).listVersions()
 })
 
-ipcMain.handle('cli:installVersion', async (_event, version: string) => {
+ipcMain.handle('cli:installVersion', async (_event, version: string, engine?: CliEngine) => {
   if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version)) {
     return { success: false, error: 'Invalid version format' }
   }
+  const mgr = pickCliManager(engine)
   try {
-    await cliManager.installVersion(version, (step, progress) => {
-      safeSend('cli:installProgress', { step, progress })
+    await mgr.installVersion(version, (step, progress) => {
+      safeSend('cli:installProgress', { step, progress, engine: mgr.engine })
     })
-    analytics.track('cli_switch_version', { version })
+    analytics.track('cli_switch_version', { version, engine: mgr.engine })
     statsCollector.logEvent('cli:installVersion')
     return { success: true }
   } catch (err) {
-    log.error('CLI installVersion failed:', err)
+    log.error(`CLI[${mgr.engine}] installVersion failed:`, err)
     return { success: false, error: (err as Error).message }
   }
 })
@@ -389,7 +400,7 @@ ipcMain.handle('subscription:autoLoginClaude', async (_event, args: unknown) => 
   // User-Agent: strip Electron/app identifiers
   const cleanUA = win.webContents.getUserAgent()
     .replace(/\s*Electron\/\S+/g, '')
-    .replace(/\s*inkess-claude-code-pro\/\S+/g, '')
+    .replace(/\s*inkess-code\/\S+/g, '')
   win.webContents.setUserAgent(cleanUA)
 
   // Accept-Language + Client Hints headers
@@ -811,7 +822,9 @@ ipcMain.handle('pty:create', (_event, options: {
     // --- Build clean PTY environment from scratch (whitelist approach) ---
     const toolsEnv = toolsManager.getEnvPatch()
     const claudeConfigDir = join(app.getPath('userData'), 'claude-config')
+    const codexConfigDir = join(app.getPath('userData'), 'codex-config')
     mkdirSync(claudeConfigDir, { recursive: true })
+    mkdirSync(codexConfigDir, { recursive: true })
 
     // Region overrides (TZ, LANG, LC_*) based on exit IP
     const regionOverrides = proxySettings.enabled ? (REGION_ENV[proxySettings.region] || {}) : {}
@@ -827,6 +840,19 @@ ipcMain.handle('pty:create', (_event, options: {
     const interceptorEnv = browserInterceptor.getEnv()
     const binDir = browserInterceptor.getBinDir()
     const existingPath = toolsEnv.PATH || buildBasePath()
+    // PATH for `claude` and `codex` commands inside the terminal: each engine's
+    // active version lives at {userData}/cli/{engine}/{ver}/{binary}. The CLI
+    // dir itself contains the binary directly (no bin/ subdir), so we add the
+    // version dir of whichever version is active.
+    const engineBinDirs: string[] = []
+    for (const mgr of [cliManager, codexManager]) {
+      const info = mgr.getInfo()
+      if (info.installed && info.path) {
+        const dir = info.path.substring(0, Math.max(info.path.lastIndexOf('/'), info.path.lastIndexOf('\\')))
+        if (dir) engineBinDirs.push(dir)
+      }
+    }
+    const cliPathPrefix = engineBinDirs.length > 0 ? engineBinDirs.join(delimiter) + delimiter : ''
 
     // Encode region vars for zdotdir .zshrc to re-apply after user's .zshrc
     const regionEnvStr = Object.entries({ ...DEFAULT_REGION_ENV, ...regionOverrides })
@@ -838,7 +864,7 @@ ipcMain.handle('pty:create', (_event, options: {
       'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH',
       'GIT_PROXY_COMMAND', 'GIT_SSH_COMMAND', 'NODE_OPTIONS',
       'ELECTRON_RUN_AS_NODE', 'ZDOTDIR', 'SHELL', 'HOME',
-      'PATH', 'CLAUDE_CONFIG_DIR',
+      'PATH', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
     ])
     const safeEnv: Record<string, string> = {}
     if (options.env) {
@@ -854,9 +880,14 @@ ipcMain.handle('pty:create', (_event, options: {
       ...interceptorEnv,
       ...safeEnv,
       CLAUDE_CONFIG_DIR: claudeConfigDir,
+      CODEX_HOME: codexConfigDir,
       __INKESS_CLAUDE_CONFIG_DIR: claudeConfigDir,
+      __INKESS_CODEX_HOME: codexConfigDir,
       __INKESS_REGION_ENV: regionEnvStr,
-      PATH: `${binDir}${delimiter}${existingPath}`,
+      // Engine bin dirs the ZDOTDIR .zshrc re-prepends after path_helper. Use
+      // the platform PATH delimiter (':' on POSIX) — the .zshrc only runs on macOS.
+      __INKESS_ENGINE_BIN_DIRS: engineBinDirs.join(delimiter),
+      PATH: `${binDir}${delimiter}${cliPathPrefix}${existingPath}`,
     })
 
     const id = ptyManager.create(options.cwd, ptyEnv, command, args)
@@ -1296,7 +1327,9 @@ ipcMain.handle('git:getBranch', async (_event, cwd: string) => {
 async function initChatMode(): Promise<void> {
   try {
     const claudeConfigDir = join(app.getPath('userData'), 'claude-config')
+    const codexConfigDir = join(app.getPath('userData'), 'codex-config')
     mkdirSync(claudeConfigDir, { recursive: true })
+    mkdirSync(codexConfigDir, { recursive: true })
 
     // Pre-create empty MCP config so buildArgs() never touches electron require()
     const { initEmptyMcpConfig } = await import('./chat/sandbox')
@@ -1309,8 +1342,9 @@ async function initChatMode(): Promise<void> {
 
     chatManager = new ChatManager({
       store: chatStore,
-      getCliBinaryPath: () => {
-        const info = cliManager.getInfo()
+      getCliBinaryPath: (engine) => {
+        const mgr = engine === 'codex' ? codexManager : cliManager
+        const info = mgr.getInfo()
         return info.installed ? info.path : ''
       },
       regionEnv: () => (proxySettings.enabled ? (REGION_ENV[proxySettings.region] || {}) : {}),
@@ -1319,11 +1353,28 @@ async function initChatMode(): Promise<void> {
         const proxyEnv = proxySettings.enabled && !tunInfo.tunRunning
           ? buildProxyEnv(proxySettings.url)
           : {}
+        // PATH parity with PTY mode: tools env + Homebrew/.local/bin/etc. via
+        // buildBasePath, plus the active engine bin dirs prepended so codex/claude
+        // can shell out to git/node/etc. on Dock-launched apps where
+        // process.env.PATH is just /usr/bin:/bin.
+        const toolsPatch = toolsManager.getEnvPatch()
+        const enginePathSegs: string[] = []
+        for (const mgr of [cliManager, codexManager]) {
+          const info = mgr.getInfo()
+          if (info.installed && info.path) {
+            const idx = Math.max(info.path.lastIndexOf('/'), info.path.lastIndexOf('\\'))
+            if (idx > 0) enginePathSegs.push(info.path.substring(0, idx))
+          }
+        }
+        const basePath = toolsPatch.PATH || buildBasePath()
+        const chatPath = enginePathSegs.length > 0
+          ? enginePathSegs.join(delimiter) + delimiter + basePath
+          : basePath
         return {
           CLAUDE_CONFIG_DIR: claudeConfigDir,
-          // buildCleanEnv strips PATH by design; reinject so whitelisted Bash
-          // tools (git/python/node/etc.) can resolve.
-          PATH: process.env.PATH || '',
+          CODEX_HOME: codexConfigDir,
+          ...toolsPatch,
+          PATH: chatPath,
           ...proxyEnv,
         }
       },
@@ -1397,7 +1448,9 @@ app.whenReady().then(async () => {
   setupMenu()
 
   analytics.track('app_launch', {
-    cli_version: cliManager.isInstalled() ? 'installed' : 'not_installed',
+    claude_installed: cliManager.isInstalled() ? 'yes' : 'no',
+    codex_installed: codexManager.isInstalled() ? 'yes' : 'no',
+    cli_version: cliManager.isInstalled() ? 'installed' : 'not_installed', // legacy field
   })
 
   onUpdateStatus((status) => {

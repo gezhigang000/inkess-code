@@ -10,7 +10,7 @@ import {
   writeFileSync,
   renameSync,
   readdirSync,
-  rmdirSync
+  rmSync
 } from 'fs'
 import { execSync } from 'child_process'
 import { pipeline } from 'stream/promises'
@@ -18,9 +18,7 @@ import { Readable } from 'stream'
 import * as os from 'os'
 import log from '../logger'
 import { fetchWithTimeout, sha256File } from '../utils/fetch'
-
-const MIRROR_BASE_URL =
-  'https://inkess-app.oss-ap-northeast-1.aliyuncs.com/cli-mirror'
+import { type Engine, type EngineSpec, getEngineSpec } from './engine-registry'
 
 /** Strict semver-like version pattern to prevent path traversal */
 const VERSION_RE = /^\d+\.\d+\.\d+$/
@@ -38,22 +36,24 @@ interface CliInfo {
   installed: boolean
   path: string
   version: string | null
+  engine: Engine
 }
 
 /**
- * Multi-version CLI manager.
+ * Multi-version CLI manager, one instance per engine (claude / codex).
  *
  * Storage layout:
- *   {userData}/cli/
+ *   {userData}/cli/{engine}/
  *     .active          — current version string (e.g. "2.1.98")
  *     2.1.78/claude    — version-specific binary
  *     2.1.87/claude
  *     2.1.98/claude
  *
- * Migration: if legacy single-binary layout is detected (cli/claude + .installed),
- * it is migrated into the versioned layout on first getInfo().
+ * For the `claude` engine we also migrate the legacy pre-engine layout
+ * ({userData}/cli/.active + {userData}/cli/{version}/claude) on first use.
  */
 export class CliManager {
+  private readonly spec: EngineSpec
   private cliDir: string
   private binaryName: string
   private _cachedInfo: CliInfo | null = null
@@ -68,10 +68,13 @@ export class CliManager {
     return join(this.cliDir, '.installed')
   }
 
-  constructor() {
-    this.cliDir = join(app.getPath('userData'), 'cli')
-    this.binaryName = os.platform() === 'win32' ? 'claude.exe' : 'claude'
+  constructor(engine: Engine = 'claude') {
+    this.spec = getEngineSpec(engine)
+    this.cliDir = join(app.getPath('userData'), 'cli', this.spec.subdir)
+    this.binaryName = os.platform() === 'win32' ? this.spec.winBinary : this.spec.unixBinary
   }
+
+  get engine(): Engine { return this.spec.engine }
 
   /** Get the binary path for a specific version */
   private versionBinaryPath(version: string): string {
@@ -87,68 +90,103 @@ export class CliManager {
     }
   }
 
-  /** Migrate legacy single-binary layout to versioned layout */
+  /**
+   * Migrate legacy pre-engine layout: {userData}/cli/{version}/claude
+   * → {userData}/cli/claude/{version}/claude. Only applies to the claude
+   * engine; codex is new so there's nothing to migrate.
+   */
   private migrateLegacy(): void {
-    const legacyBinary = join(this.cliDir, this.binaryName)
-    if (!existsSync(legacyBinary) || !existsSync(this.legacyMarkerPath)) return
-    if (existsSync(this.activePath)) return // already migrated
+    if (this.spec.engine !== 'claude') return
 
-    let version: string | null = null
-    try {
-      const marker = readFileSync(this.legacyMarkerPath, 'utf-8').trim()
-      if (marker.includes('|')) {
-        version = marker.split('|')[0]
-      }
-    } catch { /* ignore */ }
+    const legacyRoot = join(app.getPath('userData'), 'cli')
+    const legacyActive = join(legacyRoot, '.active')
+    // If the new layout already has an active version, we've migrated
+    if (existsSync(this.activePath)) return
+    // Old pre-versioned single-binary layout
+    const legacyBinary = join(legacyRoot, this.binaryName)
+    const legacyMarker = join(legacyRoot, '.installed')
 
-    if (!version) {
+    // Case A: pre-engine versioned layout — {userData}/cli/.active + {ver}/claude
+    if (existsSync(legacyActive)) {
       try {
-        const raw = execSync(`"${legacyBinary}" --version`, {
-          timeout: 5000,
-          encoding: 'utf-8'
-        }).trim()
-        const match = raw.match(/^[\d.]+/)
-        version = match ? match[0] : null
-      } catch { /* ignore */ }
-    }
-
-    if (!version) {
-      log.warn('CLI: legacy migration skipped — cannot determine version')
+        const ver = readFileSync(legacyActive, 'utf-8').trim()
+        if (ver && VERSION_RE.test(ver)) {
+          const oldVerDir = join(legacyRoot, ver)
+          const oldBin = join(oldVerDir, this.binaryName)
+          if (existsSync(oldBin)) {
+            const newVerDir = join(this.cliDir, ver)
+            mkdirSync(newVerDir, { recursive: true })
+            try { renameSync(oldVerDir, newVerDir) } catch { /* may already exist */ }
+            writeFileSync(this.activePath, ver)
+            try { unlinkSync(legacyActive) } catch { /* ignore */ }
+            log.info(`CLI[claude]: migrated pre-engine layout (v${ver})`)
+          }
+        }
+      } catch (err) {
+        log.warn(`CLI[claude]: legacy migration failed: ${(err as Error).message}`)
+      }
       return
     }
 
-    const versionDir = join(this.cliDir, version)
-    if (!existsSync(versionDir)) mkdirSync(versionDir, { recursive: true })
-    const dest = join(versionDir, this.binaryName)
-    if (!existsSync(dest)) {
-      renameSync(legacyBinary, dest)
-    } else {
-      try { unlinkSync(legacyBinary) } catch { /* ignore */ }
-    }
+    // Case B: very old single-binary layout — {userData}/cli/claude + .installed
+    if (existsSync(legacyBinary) && existsSync(legacyMarker)) {
+      let version: string | null = null
+      try {
+        const marker = readFileSync(legacyMarker, 'utf-8').trim()
+        if (marker.includes('|')) version = marker.split('|')[0]
+      } catch { /* ignore */ }
 
-    writeFileSync(this.activePath, version)
-    try { unlinkSync(this.legacyMarkerPath) } catch { /* ignore */ }
-    log.info(`CLI: migrated legacy binary to versioned layout (v${version})`)
+      if (!version) {
+        try {
+          const raw = execSync(`"${legacyBinary}" --version`, {
+            timeout: 5000,
+            encoding: 'utf-8'
+          }).trim()
+          const match = raw.match(/^[\d.]+/)
+          version = match ? match[0] : null
+        } catch { /* ignore */ }
+      }
+
+      if (!version || !VERSION_RE.test(version)) {
+        log.warn('CLI[claude]: legacy migration skipped — cannot determine version')
+        return
+      }
+
+      const versionDir = join(this.cliDir, version)
+      mkdirSync(versionDir, { recursive: true })
+      const dest = join(versionDir, this.binaryName)
+      if (!existsSync(dest)) {
+        try { renameSync(legacyBinary, dest) } catch { /* ignore */ }
+      } else {
+        try { unlinkSync(legacyBinary) } catch { /* ignore */ }
+      }
+
+      writeFileSync(this.activePath, version)
+      try { unlinkSync(legacyMarker) } catch { /* ignore */ }
+      log.info(`CLI[claude]: migrated single-binary legacy layout (v${version})`)
+    }
   }
 
   getInfo(): CliInfo {
     if (this._cachedInfo) return this._cachedInfo
 
-    // Migrate legacy layout if needed
+    if (!existsSync(this.cliDir)) {
+      mkdirSync(this.cliDir, { recursive: true })
+    }
+
     this.migrateLegacy()
 
     const version = this.getActiveVersion()
     if (version) {
       const binPath = this.versionBinaryPath(version)
       if (existsSync(binPath)) {
-        const info = { installed: true, path: binPath, version }
+        const info: CliInfo = { installed: true, path: binPath, version, engine: this.spec.engine }
         this._cachedInfo = info
         return info
       }
     }
 
-    const info: CliInfo = { installed: false, path: '', version: null }
-    return info
+    return { installed: false, path: '', version: null, engine: this.spec.engine }
   }
 
   invalidateCache(): void {
@@ -188,7 +226,7 @@ export class CliManager {
 
   async listVersions(): Promise<string[]> {
     try {
-      const res = await fetchWithTimeout(`${MIRROR_BASE_URL}/versions.json`)
+      const res = await fetchWithTimeout(`${this.spec.mirrorBase}/versions.json`)
       if (!res.ok) return []
       const raw: unknown = await res.json()
       if (!Array.isArray(raw)) return []
@@ -200,7 +238,7 @@ export class CliManager {
 
   /**
    * Install a specific version (or latest if not specified).
-   * Downloads to {cliDir}/{version}/claude and sets it as active.
+   * Downloads to {cliDir}/{version}/{binary} and sets it as active.
    * Skips download if the version is already present locally.
    */
   async install(
@@ -225,9 +263,9 @@ export class CliManager {
       if (targetVersion) {
         version = targetVersion.replace(/^v/, '')
       } else {
-        const latestRes = await fetchWithTimeout(`${MIRROR_BASE_URL}/latest`)
+        const latestRes = await fetchWithTimeout(`${this.spec.mirrorBase}/latest`)
         if (!latestRes.ok) {
-          throw new Error('Failed to check latest CLI version')
+          throw new Error(`Failed to check latest ${this.spec.displayName} version`)
         }
         version = (await latestRes.text()).trim()
       }
@@ -236,14 +274,14 @@ export class CliManager {
       if (!VERSION_RE.test(version)) {
         throw new Error(`Invalid version format: ${version}`)
       }
-      log.info(`CLI: target version is ${version}`)
+      log.info(`CLI[${this.spec.engine}]: target version is ${version}`)
 
       versionDir = join(this.cliDir, version)
       const binaryPath = join(versionDir, this.binaryName)
 
       // Skip download if already present locally
       if (existsSync(binaryPath)) {
-        log.info(`CLI: v${version} already exists locally, switching`)
+        log.info(`CLI[${this.spec.engine}]: v${version} already exists locally, switching`)
         onProgress?.('Version already downloaded, switching...', 0.9)
         writeFileSync(this.activePath, version)
         this.invalidateCache()
@@ -258,7 +296,7 @@ export class CliManager {
       // Fetch manifest
       onProgress?.('Fetching manifest...', 0.1)
       const manifestRes = await fetchWithTimeout(
-        `${MIRROR_BASE_URL}/${version}/manifest.json`
+        `${this.spec.mirrorBase}/${version}/manifest.json`
       )
       if (!manifestRes.ok) {
         throw new Error(`Failed to fetch manifest for version ${version}`)
@@ -271,9 +309,9 @@ export class CliManager {
       }
 
       // Download binary
-      const binaryUrl = `${MIRROR_BASE_URL}/${version}/${platformKey}/${platInfo.binary}`
-      onProgress?.(`Downloading Claude Code Pro v${version}...`, 0.2)
-      log.info(`CLI: downloading ${binaryUrl}`)
+      const binaryUrl = `${this.spec.mirrorBase}/${version}/${platformKey}/${platInfo.binary}`
+      onProgress?.(`Downloading ${this.spec.displayName} v${version}...`, 0.2)
+      log.info(`CLI[${this.spec.engine}]: downloading ${binaryUrl}`)
 
       const res = await fetchWithTimeout(binaryUrl, {}, 300000)
       if (!res.ok || !res.body) {
@@ -322,7 +360,7 @@ export class CliManager {
           `Checksum mismatch: expected ${platInfo.checksum}, got ${actual}`
         )
       }
-      log.info('CLI: checksum verified')
+      log.info(`CLI[${this.spec.engine}]: checksum verified`)
 
       // Move tmp to final
       renameSync(tmpPath, binaryPath)
@@ -336,22 +374,30 @@ export class CliManager {
       if (platform === 'darwin') {
         try {
           execSync(`xattr -cr "${binaryPath}"`, { timeout: 5000 })
-          log.info('CLI: cleared quarantine attribute')
+          log.info(`CLI[${this.spec.engine}]: cleared quarantine attribute`)
         } catch {
-          log.warn('CLI: failed to clear quarantine attribute (non-fatal)')
+          log.warn(`CLI[${this.spec.engine}]: failed to clear quarantine attribute (non-fatal)`)
         }
       }
 
       onProgress?.('Verifying installation...', 0.9)
 
+      // Verify --version works. Timeout scales with engine + platform:
+      //   - Claude JS CLI: ~1s cold start, 10s timeout is fine everywhere.
+      //   - Codex Rust binary on Windows: first-run Defender scan can take
+      //     20-40s on a fresh binary. Be generous here to avoid a perpetual
+      //     install → verify-fail → retry loop the first time.
+      const verifyTimeoutMs = this.spec.engine === 'codex'
+        ? (platform === 'win32' ? 90_000 : 30_000)
+        : 10_000
       try {
-        execSync(`"${binaryPath}" --version`, { timeout: 10000 })
+        execSync(`"${binaryPath}" --version`, { timeout: verifyTimeoutMs })
       } catch (verifyErr) {
-        log.error('CLI: binary verification failed:', verifyErr)
+        log.error(`CLI[${this.spec.engine}]: binary verification failed (timeout=${verifyTimeoutMs}ms):`, verifyErr)
         try { unlinkSync(binaryPath) } catch { /* ignore */ }
-        try { rmdirSync(versionDir) } catch { /* ignore — not empty is fine */ }
+        try { rmSync(versionDir, { recursive: true, force: true }) } catch { /* ignore */ }
         throw new Error(
-          'CLI installation verification failed. The downloaded file may be corrupted — please try again.'
+          `${this.spec.displayName} installation verification failed. The downloaded file may be corrupted — please try again.`
         )
       }
 
@@ -360,9 +406,10 @@ export class CliManager {
       this.invalidateCache()
       onProgress?.('Installation complete', 1.0)
     } catch (err) {
-      // Clean up empty version directory on failure
+      // Clean up partial install directory on failure (recursive — there may
+      // be a leftover .tmp file or partial binary inside).
       if (versionDir && existsSync(versionDir)) {
-        try { rmdirSync(versionDir) } catch { /* ignore — not empty is fine */ }
+        try { rmSync(versionDir, { recursive: true, force: true }) } catch { /* ignore */ }
       }
       throw err
     } finally {
@@ -379,5 +426,4 @@ export class CliManager {
   ): Promise<void> {
     await this.install(onProgress, version)
   }
-
 }

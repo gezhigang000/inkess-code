@@ -71,6 +71,16 @@ export function ChatListItem({ chat, active, onRequestDelete }: Props) {
         />
       ) : (
         <>
+          {chat.engine === 'codex' && (
+            <span
+              title="Codex"
+              style={{
+                fontSize: 9, fontWeight: 600, padding: '1px 4px', borderRadius: 3,
+                background: 'var(--bg-tertiary)', color: 'var(--text-muted)',
+                border: '1px solid var(--border)', letterSpacing: 0.3,
+              }}
+            >CDX</span>
+          )}
           <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {chat.title}
           </span>

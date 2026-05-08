@@ -10,18 +10,18 @@ const api = {
   homedir,
 
   cli: {
-    getInfo: () => ipcRenderer.invoke('cli:getInfo') as Promise<{
-      installed: boolean; path: string; version: string | null
+    getInfo: (engine?: 'claude' | 'codex') => ipcRenderer.invoke('cli:getInfo', engine) as Promise<{
+      installed: boolean; path: string; version: string | null; engine: 'claude' | 'codex'
     }>,
-    install: () => ipcRenderer.invoke('cli:install') as Promise<{
+    install: (engine?: 'claude' | 'codex') => ipcRenderer.invoke('cli:install', engine) as Promise<{
       success: boolean; error?: string
     }>,
-    listVersions: () => ipcRenderer.invoke('cli:listVersions') as Promise<string[]>,
-    installVersion: (version: string) => ipcRenderer.invoke('cli:installVersion', version) as Promise<{
+    listVersions: (engine?: 'claude' | 'codex') => ipcRenderer.invoke('cli:listVersions', engine) as Promise<string[]>,
+    installVersion: (version: string, engine?: 'claude' | 'codex') => ipcRenderer.invoke('cli:installVersion', version, engine) as Promise<{
       success: boolean; error?: string
     }>,
-    onInstallProgress: (callback: (event: { step: string; progress: number }) => void) => {
-      const listener = (_: unknown, event: { step: string; progress: number }) => callback(event)
+    onInstallProgress: (callback: (event: { step: string; progress: number; engine?: 'claude' | 'codex' }) => void) => {
+      const listener = (_: unknown, event: { step: string; progress: number; engine?: 'claude' | 'codex' }) => callback(event)
       ipcRenderer.on('cli:installProgress', listener)
       return () => ipcRenderer.removeListener('cli:installProgress', listener)
     }
@@ -318,13 +318,18 @@ const api = {
     list: () => ipcRenderer.invoke('chat:list') as Promise<Array<{
       id: string; title: string; createdAt: number; updatedAt: number;
       cwd: string; mountedDirs: string[]; claudeSessionId: string | null;
-      cliVersion: string; messageCount: number; starred: boolean
+      cliVersion: string; messageCount: number; starred: boolean;
+      engine?: 'claude' | 'codex'
     }>>,
-    create: (cwd?: string) => ipcRenderer.invoke('chat:create', cwd ? { cwd } : undefined) as Promise<{
-      id: string; title: string; createdAt: number; updatedAt: number;
-      cwd: string; mountedDirs: string[]; claudeSessionId: string | null;
-      cliVersion: string; messageCount: number; starred: boolean
-    }>,
+    create: (cwd?: string, engine?: 'claude' | 'codex') => {
+      const args = (cwd || engine) ? { cwd, engine } : undefined
+      return ipcRenderer.invoke('chat:create', args) as Promise<{
+        id: string; title: string; createdAt: number; updatedAt: number;
+        cwd: string; mountedDirs: string[]; claudeSessionId: string | null;
+        cliVersion: string; messageCount: number; starred: boolean;
+        engine?: 'claude' | 'codex'
+      }>
+    },
     send: (chatId: string, text: string) =>
       ipcRenderer.invoke('chat:send', { chatId, text }) as Promise<{ requestId: string }>,
     cancel: (chatId: string) =>

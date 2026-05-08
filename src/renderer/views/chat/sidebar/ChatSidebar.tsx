@@ -12,11 +12,9 @@ export function ChatSidebar() {
   const del = useChatStore((s) => s.delete)
   const [pendingDelete, setPendingDelete] = useState<ChatMeta | null>(null)
 
-  const createNew = async () => {
+  const createNew = async (engine: 'claude' | 'codex' = 'claude') => {
     try {
-      const meta = await window.api.chat.create()
-      // Eagerly refresh so the new chat shows in the sidebar immediately
-      // (chat:listChanged broadcast may arrive after selectChat renders).
+      const meta = await window.api.chat.create(undefined, engine)
       await useChatStore.getState().loadChatList()
       selectChat(meta.id)
     } catch (err) {
@@ -28,12 +26,12 @@ export function ChatSidebar() {
 
   return (
     <>
-      <div style={{ padding: 12, borderBottom: '1px solid var(--border)' }}>
+      <div style={{ padding: 12, borderBottom: '1px solid var(--border)', display: 'flex', gap: 6 }}>
         <button
-          onClick={createNew}
+          onClick={() => createNew('claude')}
           style={{
-            width: '100%',
-            padding: '8px 12px',
+            flex: 1,
+            padding: '8px 8px',
             background: 'var(--accent)',
             color: '#fff',
             border: 'none',
@@ -43,7 +41,23 @@ export function ChatSidebar() {
             cursor: 'pointer',
           }}
         >
-          + New chat
+          + Claude
+        </button>
+        <button
+          onClick={() => createNew('codex')}
+          style={{
+            flex: 1,
+            padding: '8px 8px',
+            background: 'var(--bg-tertiary)',
+            color: 'var(--text-primary)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 500,
+            cursor: 'pointer',
+          }}
+        >
+          + Codex
         </button>
       </div>
 

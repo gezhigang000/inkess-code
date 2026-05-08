@@ -254,14 +254,18 @@ export function TerminalApp() {
             setNetworkAlert({ type: 'error', message: t('network.alert.reconnectFailed') })
           }
         } else {
-          // If reconnect failed due to auth denial, don't show confusing network
-          // error — the user will see TunGate with a clear auth message instead.
-          const isAuthDenied = result.error?.includes('AUTH_DENIED')
-          if (isAuthDenied) {
+          // If reconnect failed due to auth denial OR an un-killable orphan
+          // sing-box process from a previous denied prompt, surface TunGate
+          // so the user explicitly re-authorizes — we do NOT keep auto-retrying,
+          // because each retry triggers another sudo prompt that macOS will
+          // auto-deny while the cooldown is active.
+          const errMsg = result.error || ''
+          const needsManualAction = errMsg.includes('AUTH_DENIED') || errMsg.includes('ORPHAN_PROCESS')
+          if (needsManualAction) {
             // Force TunGate overlay to appear — user needs to authorize manually
             setTunOk(false)
           } else {
-            setNetworkAlert({ type: 'error', message: result.error || t('network.alert.reconnectFailed') })
+            setNetworkAlert({ type: 'error', message: errMsg || t('network.alert.reconnectFailed') })
           }
         }
       } catch (err) {
@@ -636,6 +640,22 @@ export function TerminalApp() {
 
     console.log('[checkCli] → ready')
     setPhase('ready')
+
+    // Background: ensure Codex CLI is installed too. Best-effort, non-blocking,
+    // idempotent. If the user already has it we skip. Failures (no network,
+    // OSS down) are logged but don't affect Claude's flow.
+    void (async () => {
+      try {
+        const codex = await window.api.cli.getInfo('codex')
+        if (codex.installed) return
+        console.log('[checkCli] installing Codex CLI (background)...')
+        const r = await window.api.cli.install('codex')
+        if (!r.success) console.warn('[checkCli] codex install failed:', r.error)
+        else console.log('[checkCli] codex installed')
+      } catch (err) {
+        console.warn('[checkCli] codex install threw:', err)
+      }
+    })()
   }, [setCliInfo, setPhase])
 
   const handleNewTab = useCallback(async (cwd?: string) => {
@@ -647,11 +667,12 @@ export function TerminalApp() {
     }
 
     const targetCwd = cwd || (tabs.length > 0 ? tabs[tabs.length - 1].cwd : DEFAULT_CWD)
-    const { cliInstalled } = useAppStore.getState()
 
+    // Open a plain shell — user picks `claude` or `codex` themselves.
+    // Both binaries are on PATH (see main/index.ts engine PATH injection).
     const result = await window.api.pty.create({
       cwd: targetCwd,
-      launchClaude: cliInstalled,
+      launchClaude: false,
     })
 
     if (result.error || !result.id) {
@@ -1089,7 +1110,7 @@ export function TerminalApp() {
           bottomOffset={16}
           onDownload={() => {
             const v = appUpdateStatus.version || ''
-            const url = `https://download.inkessai.com/pro-releases/latest/macos-arm64-v${v}.dmg`
+            const url = `https://download.inkessai.com/code-releases/latest/macos-arm64-v${v}.dmg`
             window.api.shell.openExternal(url)
           }}
           onDismiss={() => setAppUpdateDismissed(true)}
