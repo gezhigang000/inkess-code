@@ -33,6 +33,14 @@
       {
         "from": "resources/rule-set",
         "to": "rule-set"
+      },
+      {
+        "from": "build/helper/inkess-ccp-helper",
+        "to": "helper/inkess-ccp-helper"
+      },
+      {
+        "from": "resources/com.inkess.code.helper.plist",
+        "to": "helper/com.inkess.code.helper.plist"
       }
     ],
     "afterPack": "build/fix-framework.js",

@@ -189,6 +189,14 @@ const api = {
     },
   },
 
+  helper: {
+    getStatus: () => ipcRenderer.invoke('helper:status') as Promise<{
+      installed: boolean; running: boolean; version: string | null; platform?: string
+    }>,
+    install: () => ipcRenderer.invoke('helper:install') as Promise<{ success: boolean; error?: string }>,
+    uninstall: () => ipcRenderer.invoke('helper:uninstall') as Promise<{ success: boolean; error?: string }>,
+  },
+
   browser: {
     open: (url: string) => ipcRenderer.invoke('browser:open', url) as Promise<{ success?: boolean; error?: string }>,
     closeAll: () => ipcRenderer.invoke('browser:closeAll'),

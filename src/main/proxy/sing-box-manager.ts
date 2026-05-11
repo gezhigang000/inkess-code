@@ -12,6 +12,8 @@ import {
   parseStaleSingBoxRouteCount,
 } from './sing-box-stale-state'
 import { fetchWithTimeout } from '../utils/fetch'
+import { HelperClient } from './helper-client'
+import { HelperInstaller } from './helper-installer'
 
 const execFileAsync = promisify(execFile)
 
@@ -66,27 +68,36 @@ export class SingBoxManager {
    *  a single probe target (e.g. cloudflare) is being blocked but real traffic
    *  is still flowing. */
   private _lastSeenHealthyAt = 0
-  /** Timestamp of last macOS authorization denial. Used to avoid rapid-fire
-   *  osascript prompts when macOS caches a "deny" result. */
-  private _authDeniedAt = 0
-  /** Cooldown period after auth denial — don't retry osascript for 5 minutes */
-  private static AUTH_DENY_COOLDOWN_MS = 5 * 60 * 1000
+  /** Helper client for communicating with the privileged daemon (macOS). */
+  private _helperClient = new HelperClient()
+  /** Helper installer for managing the LaunchDaemon lifecycle. */
+  private _helperInstaller: HelperInstaller | null = null
+  /** Whether the helper was freshly installed this session (user saw password prompt). */
+  private _helperJustInstalled = false
 
   constructor() {
     this.singboxDir = join(app.getPath('userData'), 'sing-box')
     this.configPath = join(this.singboxDir, 'config.json')
     mkdirSync(this.singboxDir, { recursive: true })
+    if (os.platform() === 'darwin') {
+      this._helperInstaller = new HelperInstaller(process.resourcesPath, this._helperClient)
+    }
   }
 
   get mode(): SingBoxMode { return this._mode }
   get status(): string { return this._status }
   get lastError(): string | null { return this._lastError }
 
-  /** Clear auth denial cooldown — allows the next startTun to prompt for password.
-   *  Called when user explicitly clicks "Retry" in TunGate (intentional action). */
+  /** Legacy no-op — auth cooldown removed with helper daemon. */
   clearAuthDenyCooldown(): void {
-    this._authDeniedAt = 0
+    // No-op: helper daemon eliminates per-operation sudo prompts
   }
+
+  /** Get the helper client for external use (IPC handlers). */
+  get helperClient(): HelperClient { return this._helperClient }
+
+  /** Get the helper installer for external use (IPC handlers). */
+  get helperInstaller(): HelperInstaller | null { return this._helperInstaller }
 
   /**
    * Subscribe to tunnel status updates. Called whenever a material change
@@ -178,9 +189,11 @@ export class SingBoxManager {
     return !this.isProcessAlive(pid)
   }
 
-  /** Kill a process. If sudo=true, uses osascript/UAC (requires GUI interaction).
-   *  On macOS, tries non-sudo kill first — if the process was started by the same
-   *  user (or we have permission), this avoids an unnecessary sudo prompt. */
+  /** Kill a process by PID.
+   *  - macOS: tries non-sudo kill first, falls back to osascript if needed
+   *  - Windows with sudo: UAC via PowerShell
+   *  Note: the helper path in _stopImpl bypasses this method entirely.
+   */
   private killProcess(pid: number, signal: 'TERM' | 'KILL', sudo = true): void {
     const sig = signal === 'KILL' ? '-9' : '-TERM'
     try {
@@ -194,35 +207,24 @@ export class SingBoxManager {
           execSync(`taskkill /F /PID ${pid}`, { timeout: 5000, stdio: 'pipe' })
         }
       } else if (sudo) {
-        // Try non-sudo first — avoids osascript dialog if we have permission
+        // Try non-sudo first
         try {
           execSync(`kill ${sig} ${pid}`, { timeout: 3000, stdio: 'pipe' })
           log.info(`[sing-box] killed pid=${pid} signal=${signal} (non-sudo)`)
           return
         } catch {
-          // Expected: "Operation not permitted" for root-owned process — fall through to sudo
+          // Expected: "Operation not permitted" for root-owned process
         }
+        // Fallback to osascript (only reached if helper is unavailable)
         try {
           execSync(
             `osascript -e 'do shell script "kill ${sig} ${pid}" with administrator privileges'`,
             { timeout: 15000, stdio: 'pipe' }
           )
         } catch (sudoErr) {
-          const msg = (sudoErr as Error).message
-          if (msg.includes('-60005') || msg.includes('密码不正确') || msg.includes('User canceled')) {
-            // Before activating cooldown, check whether the target process is
-            // actually still alive — sometimes the non-sudo kill above did
-            // succeed via SIGTERM signal-out propagation but threw an EPERM-
-            // shaped error first, OR the process was already dying. Locking
-            // ourselves into a 5-minute auth-deny cooldown when the process
-            // is gone is the bug behind the "ORPHAN_PROCESS" deadlock users
-            // hit when they fat-finger the sudo password.
-            if (!this.isProcessAlive(pid)) {
-              log.info(`[sing-box] kill pid=${pid}: sudo denied but process is already dead — no cooldown needed`)
-              return
-            }
-            this._authDeniedAt = Date.now()
-            log.warn(`[sing-box] kill pid=${pid}: macOS auth denied — cooldown activated`)
+          if (!this.isProcessAlive(pid)) {
+            log.info(`[sing-box] kill pid=${pid}: sudo denied but process is already dead`)
+            return
           }
           throw sudoErr
         }
@@ -391,12 +393,9 @@ export class SingBoxManager {
   }
 
   /**
-   * Actively clean up orphan network state. Requires sudo (via osascript).
-   * Safe to call only when no sing-box process is running — caller must ensure.
-   *
-   * Deletes split-default routes pointing at 198.18.x.x and destroys utun
-   * interfaces in that subnet. Runs inside a single osascript invocation so
-   * the user sees exactly one password prompt.
+   * Actively clean up orphan network state.
+   * macOS: uses helper daemon (no sudo prompt) — stop + restore_dns.
+   * Windows: uses PowerShell UAC.
    */
   private async cleanupStaleNetworkState(): Promise<void> {
     const stale = this.detectStaleNetworkState()
@@ -412,17 +411,11 @@ export class SingBoxManager {
     )
 
     if (os.platform() === 'win32') {
-      // Windows: remove orphan WinTUN adapter and stale firewall rules.
-      // Removing/disabling the adapter also drops its routes automatically.
-      // Requires elevation — use PowerShell -Verb RunAs like startWithAdmin.
-      const ifNames = stale.interfaces.filter(n => /^[\w-]+$/.test(n)) // sanitize
+      const ifNames = stale.interfaces.filter(n => /^[\w-]+$/.test(n))
       try {
         const cmds = [
-          // Disable orphan WinTUN adapter(s)
           ...ifNames.map(n => `netsh interface set interface '${n}' admin=disable 2>$null`),
-          // Remove persistent Windows Firewall rules left by sing-box
           `Remove-NetFirewallRule -DisplayName 'sing-tun*' -ErrorAction SilentlyContinue`,
-          // Flush DNS cache (stale sing-box DNS entries)
           `ipconfig /flushdns 2>$null`,
         ]
         const script = cmds.join('; ')
@@ -440,21 +433,26 @@ export class SingBoxManager {
 
     if (os.platform() !== 'darwin') return
 
-    // Validate route destinations before interpolating into shell — the
-    // parser already constrains format, but defense in depth. Allowed
-    // characters for netstat-style destinations: digits, dots, slashes.
+    // macOS: use helper daemon for cleanup (stop sing-box + restore DNS)
+    try {
+      if (await this._helperClient.isAvailable()) {
+        await this._helperClient.stop().catch(() => {})
+        await this._helperClient.restoreDns().catch(() => {})
+        log.info('[sing-box] stale network state cleanup complete (via helper)')
+        this._hasStaleNetworkState = false
+        return
+      }
+    } catch {
+      log.warn('[sing-box] helper not available for stale cleanup, falling back to osascript')
+    }
+
+    // Fallback: osascript (if helper not installed yet)
     const safeDests = stale.routeDestinations.filter((d) => /^[\d./]+$/.test(d))
-    // Validate interface names — parser guarantees /^utun\d+$/, but belt-and-suspenders.
     const safeIfaces = stale.interfaces.filter((i) => /^utun\d+$/.test(i))
 
-    // Build a single shell script that deletes every discovered route and
-    // destroys every discovered utun. Ignore individual failures — the goal
-    // is to leave the system in a clean state, not to verify each operation.
     const routeCleanup = safeDests
       .map((dest) => `route -n delete -net ${dest} 198.18.0.1 2>/dev/null || true`)
       .join('; ')
-    // Also try explicit 0.0.0.0/1 + 128.0.0.0/1 (alternative sing-box split)
-    // and the host route to the gateway itself. These are no-ops if absent.
     const extraRoutes = [
       'route -n delete -net 0.0.0.0/1 198.18.0.1 2>/dev/null || true',
       'route -n delete -net 128.0.0.0/1 198.18.0.1 2>/dev/null || true',
@@ -476,12 +474,10 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
         `osascript -e 'do shell script "${fullScript.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}" with administrator privileges'`,
         { timeout: 30000, stdio: 'pipe' },
       )
-      log.info('[sing-box] stale network state cleanup complete')
+      log.info('[sing-box] stale network state cleanup complete (osascript fallback)')
       this._hasStaleNetworkState = false
     } catch (err) {
       log.error(`[sing-box] stale network state cleanup failed: ${(err as Error).message}`)
-      // Don't throw — caller should still attempt to start TUN; worst case
-      // the residuals remain and sing-box's own startup will override them.
     }
   }
 
@@ -510,84 +506,100 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
     }
   }
 
-  // setSystemDns is handled inside the sudo shell command (startWithSudo)
-  // to ensure it runs as root. See shellCmd in startWithSudo().
+  // DNS setup is handled by the helper daemon (setDns RPC) or inside the
+  // osascript fallback shell command. See startViaHelper() / startWithSudoFallback().
 
-  /** Restore macOS system DNS to default (requires sudo via osascript). */
+  /** Restore macOS system DNS to default. Uses helper daemon (no sudo prompt). */
   private restoreSystemDns(): void {
     if (os.platform() !== 'darwin') return
-    try {
-      const cmd = `scutil <<EOF
+    // Fire-and-forget via helper — async but we don't await in _stopImpl
+    this._helperClient.restoreDns().catch((err) => {
+      log.warn(`[sing-box] helper DNS restore failed, trying osascript fallback: ${err.message}`)
+      // Fallback to osascript if helper is unavailable
+      try {
+        const cmd = `scutil <<EOF
 remove State:/Network/Service/sing-box-tun/DNS
 EOF
 dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
-      execSync(
-        `osascript -e 'do shell script "${cmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}" with administrator privileges'`,
-        { timeout: 15000, stdio: 'pipe' }
-      )
-      log.info('[sing-box] system DNS restored (sudo)')
-    } catch (err) {
-      const msg = (err as Error).message
-      if (msg.includes('-60005') || msg.includes('密码不正确') || msg.includes('User canceled')) {
-        this._authDeniedAt = Date.now()
-        log.warn(`[sing-box] DNS restore: macOS auth denied — cooldown activated`)
+        execSync(
+          `osascript -e 'do shell script "${cmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}" with administrator privileges'`,
+          { timeout: 15000, stdio: 'pipe' }
+        )
+        log.info('[sing-box] system DNS restored (osascript fallback)')
+      } catch (fallbackErr) {
+        log.warn(`[sing-box] failed to restore system DNS: ${(fallbackErr as Error).message}`)
       }
-      // May fail if watchdog already cleaned up, or user canceled — that's OK
-      log.warn(`[sing-box] failed to restore system DNS: ${msg}`)
-    }
+    })
   }
 
   private async _stopImpl(restoreDns: boolean): Promise<void> {
     log.info(`[sing-box] stop() called, mode=${this._mode} status=${this._status} restoreDns=${restoreDns}`)
     this.stopInterfaceMonitor()
 
-    // Restore system DNS before killing sing-box (skip on restart to avoid DNS leak window)
-    if (restoreDns) this.restoreSystemDns()
+    // macOS with helper: delegate stop + DNS restore to the helper daemon (no sudo prompt)
+    // Retry once after 500ms — helper may be mid-restart (launchd KeepAlive bounce)
+    const helperReady = os.platform() === 'darwin' && (
+      await this._helperClient.isAvailable() ||
+      await new Promise<boolean>(r => setTimeout(async () => r(await this._helperClient.isAvailable()), 500))
+    )
+    if (helperReady) {
+      try {
+        // Restore DNS first (while sing-box is still routing), then stop sing-box
+        if (restoreDns) {
+          await this._helperClient.restoreDns().catch((err) =>
+            log.warn(`[sing-box] helper DNS restore failed: ${err.message}`)
+          )
+        }
+        await this._helperClient.stop()
+        log.info('[sing-box] stopped via helper')
+      } catch (err) {
+        log.warn(`[sing-box] helper stop failed: ${(err as Error).message}, trying direct kill`)
+        await this._stopImplManual(restoreDns)
+        return
+      }
+      this.removePidFile()
+      this._mode = 'off'
+      this._status = 'stopped'
+      this._lastError = null
+      this._internetReachable = null
+      this._latencyMs = null
+      this._lastActualIp = null
+      this._lastSeenHealthyAt = 0
+      this.emitStatus(null, null)
+      return
+    }
 
+    // Non-helper path (Windows, Linux, or helper unavailable)
+    if (restoreDns) this.restoreSystemDns()
+    await this._stopImplManual(restoreDns)
+  }
+
+  /** Manual stop — kill via PID file. Used when helper is unavailable or on Windows. */
+  private async _stopImplManual(_restoreDns = true): Promise<void> {
     // Kill the osascript/powershell wrapper process (if any)
     const proc = this.process
     this.process = null
     if (proc) {
       if (process.platform === 'win32') {
-        try { require('child_process').execSync(`taskkill /F /PID ${proc.pid}`, { stdio: 'pipe' }) } catch { /* ignore */ }
+        try { execSync(`taskkill /F /PID ${proc.pid}`, { stdio: 'pipe' }) } catch { /* ignore */ }
       } else {
         try { proc.kill('SIGTERM') } catch { /* ignore */ }
       }
     }
 
     // Kill the actual sing-box root process via PID file.
-    //
-    // Failure handling: if the user denies the macOS sudo prompt during SIGTERM
-    // we MUST NOT escalate to SIGKILL — that triggers a second osascript dialog
-    // (and a third if startTun follows). Past behavior: three back-to-back deny
-    // prompts on a single reconnect, then a bogus "confirmed dead" log + status
-    // reset to 'stopped' even when the orphan was still alive. That left the
-    // state machine lying to itself and the next startTun racing the orphan
-    // for the TUN interface.
     const pid = this.readPidFile()
     if (pid > 0 && this.isProcessAlive(pid)) {
       log.info(`[sing-box] stopping pid=${pid} with SIGTERM...`)
-      const authDeniedBefore = this._authDeniedAt
       this.killProcess(pid, 'TERM')
       const dead = await this.waitForProcessDeath(pid, 5000)
 
       if (!dead) {
-        // Skip SIGKILL escalation when SIGTERM's sudo prompt was denied —
-        // a second prompt within seconds will be auto-denied by macOS's
-        // cached deny anyway, and just spams the user with dialogs.
-        const authDeniedDuringTerm = this._authDeniedAt > authDeniedBefore
-        if (authDeniedDuringTerm) {
-          log.warn(`[sing-box] pid=${pid} still alive but sudo was denied — skipping SIGKILL to avoid prompt loop`)
-        } else {
-          log.warn(`[sing-box] pid=${pid} still alive after SIGTERM, sending SIGKILL`)
-          this.killProcess(pid, 'KILL')
-          await this.waitForProcessDeath(pid, 3000)
-        }
+        log.warn(`[sing-box] pid=${pid} still alive after SIGTERM, sending SIGKILL`)
+        this.killProcess(pid, 'KILL')
+        await this.waitForProcessDeath(pid, 3000)
       }
 
-      // Verify actual death before cleaning up state. If the orphan is still
-      // alive, leave the PID file in place and surface the failure so callers
-      // (reconnect / startTun) bail out instead of racing the orphan.
       if (this.isProcessAlive(pid)) {
         log.error(`[sing-box] FAILED to kill pid=${pid} — leaving PID file, marking error`)
         this._status = 'error'
@@ -648,22 +660,6 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
 
   private async _startTunImpl(proxyUrl: string): Promise<{ success?: boolean; error?: string }> {
     try {
-      // Check auth denial cooldown — if macOS recently denied our osascript
-      // request (user cancelled or system cached a deny), don't retry immediately.
-      // This prevents the "rapid-fire sudo dialog" loop where macOS auto-rejects
-      // without showing a dialog, and the app keeps retrying every few seconds.
-      if (os.platform() === 'darwin' && this._authDeniedAt > 0) {
-        const elapsed = Date.now() - this._authDeniedAt
-        if (elapsed < SingBoxManager.AUTH_DENY_COOLDOWN_MS) {
-          const remainSec = Math.ceil((SingBoxManager.AUTH_DENY_COOLDOWN_MS - elapsed) / 1000)
-          const error = `AUTH_DENIED: Admin authorization was denied. Retry in ${remainSec}s, or click Retry to authorize now.`
-          log.info(`[sing-box] startTun blocked — auth denied ${Math.round(elapsed / 1000)}s ago, cooldown ${remainSec}s remaining`)
-          return { error }
-        }
-        // Cooldown expired — clear the flag and allow retry
-        this._authDeniedAt = 0
-      }
-
       this.reconcileStatus()
 
       await this.ensureInstalled()
@@ -704,14 +700,14 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
       this._status = 'starting'
 
       if (os.platform() === 'darwin') {
-        await this.startWithSudo()
+        await this.startViaHelper()
       } else if (os.platform() === 'win32') {
         await this.startWithAdmin()
       } else {
         this.startProcess()
       }
 
-      // DNS override is handled inside startWithSudo's shell command (runs as root)
+      // DNS override is handled inside startViaHelper / startWithSudoFallback.
       // Emit a status update so renderer knows TUN is up. Latency/IP remain
       // null until the caller runs a connectivity test.
       this._internetReachable = null
@@ -1204,22 +1200,74 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
   }
 
   /**
-   * Start sing-box via osascript (macOS sudo).
-   * Returns a Promise that resolves when sing-box is confirmed running.
+   * Start sing-box via the privileged helper daemon (macOS).
+   * The helper runs as root and manages sing-box lifecycle — no sudo prompt needed.
+   * Falls back to osascript if helper is not available.
    */
-  private startWithSudo(): Promise<void> {
+  private async startViaHelper(): Promise<void> {
+    // Ensure the helper daemon is installed and running
+    if (this._helperInstaller) {
+      try {
+        this._helperJustInstalled = await this._helperInstaller.ensureReady()
+      } catch (err) {
+        const msg = (err as Error).message
+        if (msg.includes('AUTH_DENIED')) {
+          this._status = 'stopped'
+          this._lastError = msg
+          throw err
+        }
+        log.warn(`[sing-box] helper not available: ${msg}, falling back to osascript`)
+        await this.startWithSudoFallback()
+        return
+      }
+    }
+
+    // Start sing-box via helper RPC
+    try {
+      await this._helperClient.start(this.binaryPath, this.configPath, process.pid)
+    } catch (err) {
+      log.error(`[sing-box] helper start failed: ${(err as Error).message}`)
+      throw err
+    }
+
+    // Set DNS via helper
+    try {
+      await this._helperClient.setDns(SYSTEM_DNS_OVERRIDE)
+    } catch (err) {
+      log.warn(`[sing-box] helper DNS setup failed: ${(err as Error).message}`)
+      // Non-fatal — sing-box hijack-dns can still work in some configurations
+    }
+
+    // Verify sing-box is running via helper status
+    const status = await this._helperClient.getStatus()
+    if (status.singbox_running) {
+      this._status = 'running'
+      log.info(`[sing-box] confirmed running via helper, pid=${status.singbox_pid}`)
+    } else {
+      // Give it a moment to start
+      await new Promise(r => setTimeout(r, 2000))
+      const retry = await this._helperClient.getStatus()
+      if (retry.singbox_running) {
+        this._status = 'running'
+        log.info(`[sing-box] confirmed running via helper (retry), pid=${retry.singbox_pid}`)
+      } else {
+        throw new Error('sing-box failed to start via helper')
+      }
+    }
+  }
+
+  /**
+   * Fallback: start sing-box via osascript (macOS sudo) when helper is unavailable.
+   * This is the legacy path — each start requires a password prompt.
+   */
+  private startWithSudoFallback(): Promise<void> {
     return new Promise((resolve, reject) => {
       const safeBin = this.binaryPath.replace(/'/g, "'\\''")
       const safeCfg = this.configPath.replace(/'/g, "'\\''")
       const safePid = this.pidFilePath.replace(/'/g, "'\\''")
       const logFile = join(this.singboxDir, 'sing-box.log').replace(/'/g, "'\\''")
-      // Start sing-box in background, write PID, then monitor parent (Electron) process.
-      // When parent dies (app crash/force-quit), the watchdog loop detects it and kills sing-box.
-      // This prevents process leak when before-quit cleanup fails.
       const parentPid = process.pid
-      // DNS setup (runs as root inside osascript):
-      // Set system DNS so macOS mDNSResponder sends DNS through TUN
-      // where sing-box hijack-dns intercepts → FakeIP returns instant fake IP
+
       const dnsSetup = `scutil <<DNSEOF
 d.init
 d.add ServerAddresses * ${SYSTEM_DNS_OVERRIDE}
@@ -1233,14 +1281,6 @@ remove State:/Network/Service/sing-box-tun/DNS
 DNSEOF
 dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
 
-      // Shell: start sing-box → write PID → set DNS → watchdog → cleanup DNS + kill
-      //
-      // Graceful shutdown: after SIGTERM we wait up to ~5 seconds polling for
-      // the process to exit before escalating to SIGKILL. This gives sing-box
-      // time to run its own cleanup handlers — tear down the TUN interface,
-      // remove auto_route entries, and unbind DNS rules. Without this grace
-      // period, SIGKILL leaves utun interfaces and /1 split routes behind,
-      // black-holing the user's network until manual cleanup.
       const shellCmd = `'${safeBin}' run -c '${safeCfg}' > '${logFile}' 2>&1 & SB_PID=$!; echo $SB_PID > '${safePid}'; sleep 1; ${dnsSetup}; while kill -0 ${parentPid} 2>/dev/null && kill -0 $SB_PID 2>/dev/null; do sleep 2; done; ${dnsCleanup}; kill -TERM $SB_PID 2>/dev/null; for _i in 1 2 3 4 5 6 7 8 9 10; do kill -0 $SB_PID 2>/dev/null || break; sleep 0.5; done; kill -9 $SB_PID 2>/dev/null`
 
       let settled = false
@@ -1258,12 +1298,12 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
         cleanup()
         if (ok) {
           this._status = 'running'
-          log.info('[sing-box] confirmed running via PID file')
+          log.info('[sing-box] confirmed running via PID file (osascript fallback)')
           resolve()
         } else {
           this._status = 'error'
           this._lastError = err || 'Failed to start sing-box'
-          log.error(`[sing-box] startWithSudo failed: ${err}`)
+          log.error(`[sing-box] startWithSudoFallback failed: ${err}`)
           reject(new Error(err))
         }
       }
@@ -1275,37 +1315,26 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
           stdio: ['ignore', 'pipe', 'pipe'],
         })
 
-        // Poll for PID file (written after user enters password).
-        // No timeout while waiting for user to authenticate — the osascript
-        // dialog can stay open indefinitely. Once the PID file appears (user
-        // has authenticated and sing-box is launching), start a 15s timeout
-        // for the process to become alive.
         pidPollInterval = setInterval(() => {
           const pid = this.readPidFile()
           if (pid > 0) {
             if (this.isProcessAlive(pid)) {
               settle(true)
-            } else {
-              // PID appeared but process already dead — give it a moment
-              // (sing-box may still be initializing). Start a short timeout
-              // if we haven't already.
-              if (!timeoutTimer) {
-                timeoutTimer = setTimeout(() => {
-                  const retryPid = this.readPidFile()
-                  if (retryPid > 0 && this.isProcessAlive(retryPid)) {
-                    settle(true)
-                  } else {
-                    settle(false, 'sing-box exited immediately after start')
-                  }
-                }, 15000)
-              }
+            } else if (!timeoutTimer) {
+              timeoutTimer = setTimeout(() => {
+                const retryPid = this.readPidFile()
+                if (retryPid > 0 && this.isProcessAlive(retryPid)) {
+                  settle(true)
+                } else {
+                  settle(false, 'sing-box exited immediately after start')
+                }
+              }, 15000)
             }
           }
         }, 300)
 
         this.process.on('exit', (code) => {
           this.process = null
-          // Check if sing-box is alive (runs as separate root process)
           const pid = this.readPidFile()
           if (pid > 0 && this.isProcessAlive(pid)) {
             settle(true)
@@ -1319,11 +1348,7 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
         this.process.stderr?.on('data', (data: Buffer) => {
           const msg = data.toString().trim()
           if (msg) log.warn(`[sing-box sudo] ${msg}`)
-          // Detect macOS authorization denial:
-          // -60005: "管理员用户名或密码不正确" — auth denied (also when macOS caches deny)
-          // "User canceled" — user explicitly clicked Cancel
           if (msg.includes('-60005') || msg.includes('密码不正确') || msg.includes('User canceled')) {
-            this._authDeniedAt = Date.now()
             this._status = 'stopped'
             this._lastError = 'AUTH_DENIED: Admin authorization was denied'
             settle(false, 'AUTH_DENIED: Admin authorization was denied. Click Retry and enter your Mac password.')

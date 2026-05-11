@@ -646,6 +646,43 @@ ipcMain.handle('tun:clearAuthCooldown', () => {
   singBoxManager.clearAuthDenyCooldown()
 })
 
+// IPC: Helper daemon management (macOS privileged helper for password-free TUN)
+ipcMain.handle('helper:status', async () => {
+  const installer = singBoxManager.helperInstaller
+  if (!installer) return { installed: false, running: false, version: null, platform: 'unsupported' }
+  const installed = installer.isInstalled()
+  if (!installed) return { installed: false, running: false, version: null }
+  try {
+    const info = await singBoxManager.helperClient.getInfo()
+    return { installed: true, running: info.ok, version: info.version || null }
+  } catch {
+    return { installed: true, running: false, version: null }
+  }
+})
+
+ipcMain.handle('helper:install', async () => {
+  const installer = singBoxManager.helperInstaller
+  if (!installer) return { success: false, error: 'Helper is only supported on macOS' }
+  try {
+    await installer.install()
+    await installer.waitForHelper(8000)
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: (err as Error).message }
+  }
+})
+
+ipcMain.handle('helper:uninstall', async () => {
+  const installer = singBoxManager.helperInstaller
+  if (!installer) return { success: false, error: 'Helper is only supported on macOS' }
+  try {
+    await installer.uninstall()
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: (err as Error).message }
+  }
+})
+
 ipcMain.handle('tun:testConnectivity', async (_event, exitIp?: string) => {
   if (MOCK_MODE) return { success: true, latency: 42, actualIp: '1.2.3.4' }
   const result = await singBoxManager.testConnectivity(exitIp)
