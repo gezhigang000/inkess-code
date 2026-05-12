@@ -1,0 +1,40 @@
+[package]
+name = "inkess-ccp-helper"
+version = "0.2.0"
+edition = "2021"
+description = "Privileged helper for Inkess Claude Code Pro — manages sing-box lifecycle without repeated password prompts"
+authors = ["Inkess <noreply@starapp.net>"]
+license = "MIT"
+
+[[bin]]
+name = "inkess-ccp-helper"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "signal", "sync", "time", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+anyhow = "1"
+log = "0.4"
+
+# Unix-only deps (libc for getpeereid + signals)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Windows-only deps (named pipe peer query + watchdog OpenProcess)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+] }
+
+[profile.release]
+# Small, fast startup — the helper stays resident but we still want minimal
+# launchd impact on macOS.
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+opt-level = "z"   # optimize for size; helper is not performance-critical
+panic = "abort"   # no unwinding → smaller binary

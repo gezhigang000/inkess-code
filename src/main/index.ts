@@ -89,6 +89,11 @@ const singBoxManager = new SingBoxManager()
 singBoxManager.cleanupStaleProcesses().catch(err => {
   log.warn('[startup] Failed to clean up stale tunnel processes:', err)
 })
+// Kick off helper-event subscription at startup: even if the user is not
+// signed in / TUN is not started yet, having the subscription primed means
+// the moment sing-box starts (or the helper bounces) we get a push and
+// avoid relying on the 5s renderer poll.
+void singBoxManager.reconcileStatus().catch(() => { /* ignored — helper may not be installed yet */ })
 // Forward tunnel status updates to renderer for the StatusBar network
 // indicator. This fires on startTun success, stop, and every connectivity
 // test — the renderer uses it to keep its cached latency / exit IP fresh.
@@ -463,12 +468,12 @@ ipcMain.handle('subscription:autoLoginClaude', async (_event, args: unknown) => 
 })
 
 // IPC: TUN proxy (sing-box)
-ipcMain.handle('tun:getInfo', () => {
+ipcMain.handle('tun:getInfo', async () => {
   if (MOCK_MODE) return {
     mode: 'mock', tunRunning: true, installed: true,
     lastError: null, internetReachable: true, latencyMs: 42,
   }
-  return singBoxManager.getInfo()
+  return await singBoxManager.getInfoFresh()
 })
 
 ipcMain.handle('tun:install', async () => {
@@ -1576,6 +1581,7 @@ async function doQuitWork(): Promise<void> {
     }
 
     try {
+      singBoxManager.closeHelperSubscription()
       await singBoxManager.stop()
       log.info('[before-quit] singBoxManager.stop() returned')
     } catch (err) {

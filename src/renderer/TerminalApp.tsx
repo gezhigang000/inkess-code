@@ -118,14 +118,19 @@ export function TerminalApp() {
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // TUN health monitoring:
-  // 1. Process check: 5s poll, 2 consecutive failures → kill PTYs + disconnect
-  // 2. Exit IP check: 60s poll (was 5min), verify exit IP matches expected
-  // 3. Interface alert: detect new TUN devices (e.g. Clash Verge), trigger immediate IP check
+  // 1. Process check: 30s fallback poll. Real-time updates come from the
+  //    helper-pushed `tun:statusUpdate` event (see useEffect below) — the
+  //    poll is only here in case the push channel is somehow degraded
+  //    (helper bouncing, IPC dropped). 2 consecutive failures disconnect.
+  // 2. Exit IP check: 60s poll, verify exit IP matches expected.
+  // 3. Interface alert: detect new TUN devices (e.g. Clash Verge), trigger immediate IP check.
   useEffect(() => {
     if (!tunOk || !subscriptionLoggedIn) return
     let failCount = 0
 
-    // Process liveness check (lightweight, every 5s)
+    // Process liveness fallback (every 30s)
+    // Helper-pushed status updates are the primary signal; this just catches
+    // edge cases where the push channel is unavailable.
     // Skipped while useNetworkStore.reconnecting is true — during a manual
     // reconnect sing-box is briefly down by design, we don't want to force
     // TunGate full-screen to reappear.
@@ -147,7 +152,7 @@ export function TerminalApp() {
       } else {
         failCount = 0
       }
-    }, 5000)
+    }, 30000)
 
     // Exit IP verification — adaptive cadence:
     //   - Healthy: 60s between probes.
@@ -785,9 +790,23 @@ export function TerminalApp() {
 
   // Network status push — keeps useNetworkStore in sync with sing-box
   // manager state so the StatusBar indicator always shows current latency.
+  //
+  // Also serves as the **primary** signal for showing TunGate when sing-box
+  // dies: the main process sends this push the instant the privileged
+  // helper reports a `singbox_exited` event, so we flip `tunOk` here without
+  // waiting for the fallback 30s poll. Bringing the tunnel back is the
+  // poll's job (it sees tunRunning go back to true and resets failCount).
   useEffect(() => {
     const unsub = window.api.tun.onStatusUpdate((update) => {
       useNetworkStore.getState().applyStatusUpdate(update)
+      // If the tunnel just went down while we thought it was up, surface
+      // TunGate so the user can authorize a reconnect. Skip during a manual
+      // reconnect — sing-box is briefly down by design then.
+      if (update.tunRunning === false && tunOkRef.current && !useNetworkStore.getState().reconnecting) {
+        console.warn('[App] helper reported sing-box exited — showing TunGate')
+        setTunOk(false)
+        window.api.browser.closeAll()
+      }
     })
     return () => { unsub() }
   }, [])

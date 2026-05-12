@@ -60,6 +60,22 @@ interface HelperResponse {
   version?: string
   uptime_sec?: number
   error?: string
+  /** Set on asynchronous event pushes from a Subscribe connection. */
+  event?: 'singbox_started' | 'singbox_exited'
+  /** Populated on singbox_exited (normal exit). */
+  exit_code?: number
+  /** Populated on singbox_exited (signal-induced exit, Unix only). */
+  signal?: number
+}
+
+/** Lifecycle event pushed by the helper over a Subscribe connection. */
+export interface HelperEvent {
+  event: 'singbox_started' | 'singbox_exited'
+  singbox_pid?: number
+  singbox_running?: boolean
+  started_at?: string
+  exit_code?: number
+  signal?: number
 }
 
 // --- Client ---
@@ -207,6 +223,125 @@ export class HelperClient {
       await this.send({ op: 'shutdown' })
     } catch {
       // Expected — helper closes socket on shutdown
+    }
+  }
+
+  /**
+   * Open a long-lived subscription connection. The helper will push one
+   * JSON line per sing-box lifecycle event (`singbox_started`,
+   * `singbox_exited`). Auto-reconnects on disconnect with bounded backoff,
+   * so callers can subscribe once at startup and forget about it.
+   *
+   * Returns a controller. Call `controller.close()` to stop and tear down.
+   * The `onConnect` callback fires every time the socket is freshly
+   * connected — use it to fetch a one-shot status snapshot so the caller
+   * recovers from any events missed while reconnecting.
+   */
+  subscribe(opts: {
+    onEvent: (event: HelperEvent) => void
+    onConnect?: () => void
+    onDisconnect?: (err?: Error) => void
+  }): { close: () => void } {
+    let closed = false
+    let socket: net.Socket | null = null
+    let backoffMs = 1000
+    const MAX_BACKOFF_MS = 10_000
+    let reconnectTimer: NodeJS.Timeout | null = null
+
+    const connect = () => {
+      if (closed) return
+      let buffer = ''
+      let acked = false
+      socket = net.connect({ path: this.socketPath })
+
+      socket.on('connect', () => {
+        socket!.write(JSON.stringify({ op: 'subscribe' }) + '\n')
+      })
+
+      socket.on('data', (chunk) => {
+        buffer += chunk.toString()
+        let idx: number
+        while ((idx = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, idx).trim()
+          buffer = buffer.slice(idx + 1)
+          if (!line) continue
+          let resp: HelperResponse
+          try {
+            resp = JSON.parse(line) as HelperResponse
+          } catch (e) {
+            log.warn(`[helper] subscribe: bad JSON line: ${line}`)
+            continue
+          }
+          if (!acked) {
+            // First line is the ack for our subscribe request.
+            acked = true
+            if (!resp.ok) {
+              log.warn(`[helper] subscribe ack error: ${resp.error}`)
+              socket?.destroy()
+              return
+            }
+            // Subscription is live — reset backoff and notify caller.
+            backoffMs = 1000
+            try { opts.onConnect?.() } catch (err) {
+              log.warn(`[helper] subscribe onConnect threw: ${(err as Error).message}`)
+            }
+            continue
+          }
+          // Subsequent lines are event pushes.
+          if (resp.event === 'singbox_started' || resp.event === 'singbox_exited') {
+            try {
+              opts.onEvent({
+                event: resp.event,
+                singbox_pid: resp.singbox_pid,
+                singbox_running: resp.singbox_running,
+                started_at: resp.started_at,
+                exit_code: resp.exit_code,
+                signal: resp.signal,
+              })
+            } catch (err) {
+              log.warn(`[helper] subscribe onEvent threw: ${(err as Error).message}`)
+            }
+          } else if (!resp.ok && resp.error) {
+            // Helper kicked us off — e.g. lagged subscription. Reconnect.
+            log.warn(`[helper] subscribe server message: ${resp.error}`)
+          }
+        }
+      })
+
+      const onClosed = (err?: Error) => {
+        socket = null
+        if (closed) return
+        try { opts.onDisconnect?.(err) } catch { /* swallow */ }
+        scheduleReconnect()
+      }
+
+      socket.on('error', (err) => {
+        log.debug(`[helper] subscribe socket error: ${err.message}`)
+        onClosed(err)
+      })
+      socket.on('end', () => onClosed())
+      socket.on('close', () => onClosed())
+    }
+
+    const scheduleReconnect = () => {
+      if (closed || reconnectTimer) return
+      const delay = backoffMs
+      backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS)
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
+        connect()
+      }, delay)
+    }
+
+    connect()
+
+    return {
+      close: () => {
+        closed = true
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+        try { socket?.destroy() } catch { /* ignore */ }
+        socket = null
+      },
     }
   }
 }

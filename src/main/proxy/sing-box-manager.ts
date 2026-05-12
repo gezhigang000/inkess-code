@@ -12,7 +12,7 @@ import {
   parseStaleSingBoxRouteCount,
 } from './sing-box-stale-state'
 import { fetchWithTimeout } from '../utils/fetch'
-import { HelperClient } from './helper-client'
+import { HelperClient, type HelperEvent } from './helper-client'
 import { HelperInstaller } from './helper-installer'
 
 const execFileAsync = promisify(execFile)
@@ -74,6 +74,22 @@ export class SingBoxManager {
   private _helperInstaller: HelperInstaller | null = null
   /** Whether the helper was freshly installed this session (user saw password prompt). */
   private _helperJustInstalled = false
+  /** Latched true once we've successfully talked to the helper this session.
+   *  Once latched, status reconciliation prefers the helper as the source of
+   *  truth. Stays true across transient socket errors so we don't fall back
+   *  to the legacy PID-file check (which is wrong in helper mode — the helper
+   *  spawns sing-box but does NOT write to our app's PID file path). */
+  private _helperAuthoritative = false
+  /** Cached status snapshot. Updated by reconcileStatus(). Lets sync callers
+   *  (getInfo, browser config, PTY env) read a recent value without I/O. */
+  private _lastReconcileAt = 0
+  /** Inflight reconcile promise — deduplicates concurrent reconciliations. */
+  private _reconcileInflight: Promise<void> | null = null
+  /** Active helper event subscription (close handle). When the helper pushes
+   *  a `singbox_started` / `singbox_exited` event, we react to it immediately
+   *  — no need to wait for a 5s renderer poll. Set up lazily once the helper
+   *  is confirmed available; cleaned up on dispose. */
+  private _helperSubscription: { close: () => void } | null = null
 
   constructor() {
     this.singboxDir = join(app.getPath('userData'), 'sing-box')
@@ -660,7 +676,7 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
 
   private async _startTunImpl(proxyUrl: string): Promise<{ success?: boolean; error?: string }> {
     try {
-      this.reconcileStatus()
+      await this.reconcileStatus()
 
       await this.ensureInstalled()
       await this.stop(false) // stop without restoring DNS (avoid leak window on restart)
@@ -750,8 +766,78 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
     return port
   }
 
-  /** Reconcile in-memory status with actual process state. */
-  private reconcileStatus(): void {
+  /**
+   * Reconcile in-memory status with actual process state.
+   *
+   * Source of truth:
+   *   - macOS with helper available: helper's getStatus() RPC.
+   *     The helper owns the sing-box process lifecycle and never lies.
+   *   - Everywhere else (Windows, Linux, macOS osascript fallback):
+   *     PID file + ps/tasklist process liveness check.
+   *
+   * The helper-mode branch is critical: in helper mode, our app's
+   * `~/Library/Application Support/inkess-code/sing-box/sing-box.pid` file
+   * is NEVER written (the helper spawns sing-box under launchd, no PID
+   * handshake into the app's userData dir). So the legacy PID-file check
+   * always reports "stopped" → the UI sees a phantom disconnect and
+   * triggers a reconnect every 5 seconds. This method picks the right
+   * provider for the current mode and avoids that pitfall.
+   */
+  async reconcileStatus(): Promise<void> {
+    // Deduplicate concurrent reconciles (e.g. UI poll + connectivity check)
+    if (this._reconcileInflight) return this._reconcileInflight
+    this._reconcileInflight = this._reconcileStatusImpl().finally(() => {
+      this._reconcileInflight = null
+      this._lastReconcileAt = Date.now()
+    })
+    return this._reconcileInflight
+  }
+
+  private async _reconcileStatusImpl(): Promise<void> {
+    // Prefer the helper as source of truth on macOS once it's been confirmed
+    // reachable. We probe `isAvailable` lazily — first probe gates the latch;
+    // subsequent reconciles trust the latch even across transient socket
+    // errors (a single failed getStatus does not flip us back to PID-file mode).
+    if (os.platform() === 'darwin') {
+      if (!this._helperAuthoritative) {
+        try {
+          if (await this._helperClient.isAvailable()) {
+            this._helperAuthoritative = true
+            this.ensureHelperSubscription()
+          }
+        } catch { /* ignore — helper not yet installed */ }
+      }
+      if (this._helperAuthoritative) {
+        try {
+          const status = await this._helperClient.getStatus()
+          if (status.ok && status.singbox_running) {
+            if (this._status !== 'running') {
+              this._status = 'running'
+              if (this._mode === 'off') this._mode = 'tun'
+            }
+          } else {
+            if (this._status === 'running') {
+              log.warn(`[sing-box] reconcile (helper): no live sing-box — marking stopped`)
+              this._status = 'stopped'
+              this._mode = 'off'
+              this._internetReachable = null
+              this._latencyMs = null
+            }
+          }
+          return
+        } catch (err) {
+          // Helper unreachable mid-session (launchd bouncing, socket
+          // permission glitch). Don't drop _status — keep the last known
+          // value and rely on the next reconcile. Falling through to the
+          // PID-file path would be wrong: helper-mode sing-box does NOT
+          // write the PID file, so we'd flip to "stopped" incorrectly.
+          log.warn(`[sing-box] reconcile (helper) failed, keeping last state: ${(err as Error).message}`)
+          return
+        }
+      }
+    }
+
+    // Non-helper path: PID file + process liveness
     const pid = this.readPidFile()
     if (pid > 0) {
       if (this.isProcessAlive(pid)) {
@@ -774,9 +860,16 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
     }
   }
 
-  /** Unified network status — single source of truth */
+  /** Synchronous snapshot — returns cached state without I/O. Use this from
+   *  hot paths (PTY env build, browser config) where awaiting is impractical
+   *  and a slightly stale value is fine. Pair with a background reconcile
+   *  trigger if you need fresh data. */
   getInfo(): NetworkStatus {
-    this.reconcileStatus()
+    // Kick off a background reconcile if cache is stale, but don't wait for it.
+    // The next call (or the explicit await in `tun:getInfo`) will see the result.
+    if (Date.now() - this._lastReconcileAt > 1500) {
+      void this.reconcileStatus()
+    }
     return {
       mode: this._mode,
       tunRunning: this._status === 'running',
@@ -784,6 +877,87 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
       lastError: this._lastError,
       internetReachable: this._internetReachable,
       latencyMs: this._latencyMs,
+    }
+  }
+
+  /** Fresh status — awaits reconcile, then returns. Use for user-facing
+   *  checks (renderer `tun:getInfo` IPC) where staleness shows up as UI flicker. */
+  async getInfoFresh(): Promise<NetworkStatus> {
+    await this.reconcileStatus()
+    return this.getInfo()
+  }
+
+  /**
+   * Open a long-lived Subscribe connection to the helper so we react to
+   * sing-box lifecycle changes the instant they happen, instead of waiting
+   * for the renderer's poll. Safe to call repeatedly — the second call is
+   * a no-op while a subscription is active.
+   *
+   * The subscription auto-reconnects internally; on reconnect, we run a
+   * one-shot reconcile so we don't miss state that changed while the
+   * socket was down. On `singbox_exited`, we synchronously flip _status
+   * to 'stopped' and emit a status update — which is exactly what the
+   * renderer needs to show TunGate without a 5-second blind spot.
+   */
+  private ensureHelperSubscription(): void {
+    if (this._helperSubscription) return
+    if (os.platform() !== 'darwin') return
+
+    this._helperSubscription = this._helperClient.subscribe({
+      onConnect: () => {
+        log.info('[sing-box] helper event subscription connected')
+        // Catch up on anything we may have missed while the socket was down.
+        void this.reconcileStatus()
+      },
+      onDisconnect: (err) => {
+        if (err) log.debug(`[sing-box] helper subscription dropped: ${err.message}`)
+      },
+      onEvent: (event) => this.handleHelperEvent(event),
+    })
+  }
+
+  /** React to a helper-pushed lifecycle event. Drives the same code paths
+   *  as the renderer's status polling, but with millisecond-level latency. */
+  private handleHelperEvent(event: HelperEvent): void {
+    log.info(`[sing-box] helper event: ${event.event} pid=${event.singbox_pid ?? 'n/a'}`)
+    if (event.event === 'singbox_started') {
+      // Helper confirmed a fresh sing-box is running. If our _status was
+      // already 'running' (we just called start), no-op; otherwise sync up.
+      if (this._status !== 'running') {
+        this._status = 'running'
+        if (this._mode === 'off') this._mode = 'tun'
+      }
+      this._lastReconcileAt = Date.now()
+      this.emitStatus(null, null)
+      return
+    }
+    if (event.event === 'singbox_exited') {
+      // Helper saw the sing-box child terminate (graceful stop, crash,
+      // OOM, force-kill). Flip state to stopped + emit so the renderer
+      // shows TunGate without waiting for its poll interval.
+      const wasRunning = this._status === 'running'
+      this._status = 'stopped'
+      this._mode = 'off'
+      this._internetReachable = null
+      this._latencyMs = null
+      this._lastActualIp = null
+      this._lastReconcileAt = Date.now()
+      const exitDetails = event.signal != null
+        ? `signal=${event.signal}`
+        : event.exit_code != null
+          ? `exit_code=${event.exit_code}`
+          : 'unknown'
+      const err = wasRunning ? `sing-box exited unexpectedly (${exitDetails})` : null
+      this._lastError = err
+      this.emitStatus(null, err)
+    }
+  }
+
+  /** Close the helper subscription. Called at app shutdown. */
+  closeHelperSubscription(): void {
+    if (this._helperSubscription) {
+      try { this._helperSubscription.close() } catch { /* ignore */ }
+      this._helperSubscription = null
     }
   }
 
@@ -859,7 +1033,7 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
    * If exitIp is empty, only checks that the request succeeds.
    */
   async testConnectivity(exitIp?: string): Promise<{ success: boolean; latency?: number; error?: string; actualIp?: string }> {
-    this.reconcileStatus()
+    await this.reconcileStatus()
     if (this._status !== 'running') {
       this._internetReachable = false
       this._latencyMs = null
@@ -1261,6 +1435,13 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
     const status = await this._helperClient.getStatus()
     if (status.singbox_running) {
       this._status = 'running'
+      this._helperAuthoritative = true
+      this._lastReconcileAt = Date.now()
+      // Helper now owns the lifecycle — any leftover PID file from a previous
+      // osascript-mode run is now meaningless and would only confuse cleanup
+      // paths. Remove it once helper is confirmed authoritative.
+      this.removePidFile()
+      this.ensureHelperSubscription()
       log.info(`[sing-box] confirmed running via helper, pid=${status.singbox_pid}`)
     } else {
       // Give it a moment to start
@@ -1268,6 +1449,9 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
       const retry = await this._helperClient.getStatus()
       if (retry.singbox_running) {
         this._status = 'running'
+        this._helperAuthoritative = true
+        this._lastReconcileAt = Date.now()
+        this.ensureHelperSubscription()
         log.info(`[sing-box] confirmed running via helper (retry), pid=${retry.singbox_pid}`)
       } else {
         throw new Error('sing-box failed to start via helper')
