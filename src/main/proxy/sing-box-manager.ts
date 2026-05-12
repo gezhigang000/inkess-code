@@ -984,9 +984,10 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
       for (let i = lines.length - 1; i >= 0 && i > lines.length - 5000; i--) {
         const line = lines[i]
         if (!line) continue
-        const m = line.match(/(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})/)
+        // Match TZ offset + date + time: "-0700 2026-05-08 15:55:35"
+        const m = line.match(/([+-]\d{4})\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})/)
         if (!m) continue
-        const ts = Date.parse(`${m[1]}T${m[2]}`)
+        const ts = Date.parse(`${m[2]}T${m[3]}${m[1]}`)
         if (Number.isNaN(ts)) continue
         if (ts < cutoff) break
         if (line.includes('outbound connection to') && !line.includes('open outbound connection')) {

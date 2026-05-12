@@ -127,8 +127,11 @@ export function TerminalApp() {
 
     // Process liveness check (lightweight, every 5s)
     // Skipped while useNetworkStore.reconnecting is true — during a manual
-    // reconnect sing-box is briefly down by design, we don't want to kill
-    // terminals or force TunGate full-screen to reappear.
+    // reconnect sing-box is briefly down by design, we don't want to force
+    // TunGate full-screen to reappear.
+    // NOTE: We do NOT kill PTYs here — Claude Code sessions survive network
+    // interruptions and resume when TUN reconnects. Killing PTYs would
+    // destroy the user's in-progress work unnecessarily.
     const processInterval = setInterval(async () => {
       if (useNetworkStore.getState().reconnecting) {
         failCount = 0
@@ -138,7 +141,6 @@ export function TerminalApp() {
       if (!info.tunRunning) {
         failCount++
         if (failCount >= 2) {
-          window.api.pty.killAll()
           setTunOk(false)
           window.api.browser.closeAll()
         }
@@ -195,7 +197,6 @@ export function TerminalApp() {
 
         if (result.actualIp && result.actualIp !== exitIp) {
           console.warn(`[App] exit IP changed: expected ${exitIp}, got ${result.actualIp} — reconnecting`)
-          window.api.pty.killAll()
           setTunOk(false)
           window.api.browser.closeAll()
           return
@@ -312,7 +313,6 @@ export function TerminalApp() {
         if (result.actualIp && result.actualIp !== exitIp) {
           // IP changed after external VPN appeared — route hijacked
           console.warn(`[App] IP changed after external TUN: expected ${exitIp}, got ${result.actualIp}`)
-          window.api.pty.killAll()
           setTunOk(false)
           window.api.browser.closeAll()
         }
