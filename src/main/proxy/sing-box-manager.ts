@@ -1216,9 +1216,27 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
           this._lastError = msg
           throw err
         }
-        log.warn(`[sing-box] helper not available: ${msg}, falling back to osascript`)
-        await this.startWithSudoFallback()
-        return
+        // If helper was installed but not yet available, retry with longer waits
+        if (msg.includes('did not become available') && this._helperInstaller.isInstalled()) {
+          log.info('[sing-box] helper installed but slow to start, retrying...')
+          let available = false
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            log.info(`[sing-box] helper retry ${attempt}/3 (waiting 5s)...`)
+            await this._helperInstaller.waitForHelper(5000)
+              .then(() => { available = true })
+              .catch(() => { /* try next */ })
+            if (available) break
+          }
+          if (!available) {
+            log.warn(`[sing-box] helper not available after retries, falling back to osascript`)
+            await this.startWithSudoFallback()
+            return
+          }
+        } else {
+          log.warn(`[sing-box] helper not available: ${msg}, falling back to osascript`)
+          await this.startWithSudoFallback()
+          return
+        }
       }
     }
 
