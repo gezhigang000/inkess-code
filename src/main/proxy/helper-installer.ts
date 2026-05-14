@@ -86,11 +86,17 @@ export class HelperInstaller {
       `cp '${safePlist}' '${PLIST_DEST}'`,
       `chmod 644 '${PLIST_DEST}'`,
       `chown root:wheel '${PLIST_DEST}'`,
-      // bootout may fail if not loaded — ignore error
+      // bootout may fail if not loaded — ignore error.
+      // After bootout, wait for launchd to fully deregister the old service
+      // before bootstrapping the new one. Without this delay, bootstrap can
+      // silently fail because launchd still considers the service registered.
       `launchctl bootout system/${HELPER_LABEL} 2>/dev/null || true`,
-      `launchctl bootstrap system '${PLIST_DEST}'`,
+      `sleep 2`,
+      // Retry bootstrap: first attempt may fail if launchd hasn't finished
+      // cleaning up. A second attempt after 1s covers the race.
+      `launchctl bootstrap system '${PLIST_DEST}' 2>/dev/null || { sleep 1; launchctl bootstrap system '${PLIST_DEST}'; }`,
       // Wait for daemon to create socket, then make it world-accessible
-      `for i in 1 2 3 4 5; do [ -e '${SOCKET_PATH}' ] && break; sleep 1; done`,
+      `for i in 1 2 3 4 5 6 7 8; do [ -e '${SOCKET_PATH}' ] && break; sleep 1; done`,
       `chmod 666 '${SOCKET_PATH}' 2>/dev/null || true`,
     ].join('; ')
 
@@ -153,8 +159,11 @@ export class HelperInstaller {
     }
 
     await this.install()
-    // Wait for the daemon to come up after reload
-    await this.waitForHelper(5000)
+    // Wait for the daemon to come up after reload.
+    // install() includes a 2s bootout delay + up to 8s socket wait,
+    // but the osascript blocks until done, so we just need to wait
+    // for the helper to become reachable after that.
+    await this.waitForHelper(10000)
     return true
   }
 
@@ -213,15 +222,16 @@ export class HelperInstaller {
       try {
         const reloadScript = [
           `launchctl bootout system/${HELPER_LABEL} 2>/dev/null || true`,
-          `launchctl bootstrap system \\"${PLIST_DEST}\\"`,
-          `for i in 1 2 3 4 5; do [ -e '${SOCKET_PATH}' ] && break; sleep 1; done`,
+          `sleep 2`,
+          `launchctl bootstrap system \\"${PLIST_DEST}\\" 2>/dev/null || { sleep 1; launchctl bootstrap system \\"${PLIST_DEST}\\"; }`,
+          `for i in 1 2 3 4 5 6 7 8; do [ -e '${SOCKET_PATH}' ] && break; sleep 1; done`,
           `chmod 666 '${SOCKET_PATH}' 2>/dev/null || true`,
         ].join('; ')
         execSync(
           `osascript -e 'do shell script "${reloadScript}" with administrator privileges'`,
           { timeout: 30_000, stdio: 'pipe' },
         )
-        await this.waitForHelper(5000)
+        await this.waitForHelper(10000)
         await this.ensureUpToDate()
         return false
       } catch {

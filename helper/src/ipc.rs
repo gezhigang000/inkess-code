@@ -66,9 +66,11 @@ mod unix_impl {
             }
             let inner = UnixListener::bind(endpoint)?;
 
-            // Tighten permissions
+            // Allow any local user to connect (the app runs as the logged-in
+            // user, not root). Phase 2 code-signature verification is the real
+            // security boundary, not socket permissions.
             let mut perms = std::fs::metadata(endpoint)?.permissions();
-            perms.set_mode(0o660);
+            perms.set_mode(0o666);
             std::fs::set_permissions(endpoint, perms)?;
 
             Ok(Self { inner })
