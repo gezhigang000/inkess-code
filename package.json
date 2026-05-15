@@ -1,6 +1,6 @@
 {
   "name": "inkess-code",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Inkess Code — Zero-config Claude Code & Codex terminal for Inkess users",
   "author": "Inkess",
   "main": "./out/main/index.js",

@@ -21,7 +21,7 @@ const PLIST_DEST = `/Library/LaunchDaemons/${HELPER_LABEL}.plist`
 const SOCKET_PATH = '/var/run/inkess-ccp-helper.sock'
 
 /** Expected helper version — bump when updating the bundled binary. */
-const HELPER_VERSION = '0.2.0'
+const HELPER_VERSION = '0.2.1'
 
 export class HelperInstaller {
   private client: HelperClient

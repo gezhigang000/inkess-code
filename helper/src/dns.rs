@@ -39,7 +39,7 @@ pub async fn set_dns(server: &str) -> Result<()> {
     // scutil accepts a script on stdin — we construct one that adds the
     // DNS service dict and flushes the resolver cache.
     let script = format!(
-        "d.init\nd.add ServerAddresses * {server}\nset {key}\nquit\n",
+        "d.init\nd.add ServerAddresses * {server}\nd.add SupplementalMatchDomains * \"\"\nset {key}\nquit\n",
         server = server,
         key = DNS_SERVICE_KEY,
     );
