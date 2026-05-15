@@ -106,6 +106,8 @@ export const zh: Record<TranslationKey, string> = {
   'settings.proxyRegionHint': '将时区和语言设置为代理所在地区，避免环境信息不一致',
   'settings.proxyStatus': '生效的环境变量',
   'settings.proxyApplyHint': '仅对新建的终端标签页生效，已有标签页不受影响。',
+  'settings.useHelper': 'Helper 守护进程（免密启动）',
+  'settings.useHelperHint': '使用特权守护进程管理 TUN，关闭后每次启动需输入密码。',
 
   // Welcome
   'welcome.openFolder': '打开工作目录',
@@ -226,6 +228,7 @@ export const zh: Record<TranslationKey, string> = {
   'tun.cancel': '取消',
   'tun.refreshConfig': '刷新配置',
   'tun.switchAccount': '切换账号',
+  'tun.switchToPassword': '改用密码启动',
   'tun.disconnected': '网络已断开，请重新连接后继续使用。',
 
   // Stats

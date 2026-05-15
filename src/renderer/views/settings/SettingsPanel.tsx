@@ -154,7 +154,8 @@ const REGION_OPTIONS = [
 
 function NetworkSection({ onTunStatusChange }: { onTunStatusChange?: (ok: boolean) => void }) {
   const { t } = useI18n()
-  const { proxyUrl, proxyRegion, setProxyUrl, setProxyRegion } = useSettingsStore()
+  const { proxyUrl, proxyRegion, useHelper, setProxyUrl, setProxyRegion, setUseHelper } = useSettingsStore()
+  const isMac = window.api?.platform === 'darwin'
 
   const region = REGION_OPTIONS.find(r => r.id === proxyRegion) || REGION_OPTIONS[0]
 
@@ -173,6 +174,18 @@ function NetworkSection({ onTunStatusChange }: { onTunStatusChange?: (ok: boolea
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>{t('settings.proxyTunUrlHint')}</div>
       </SettingsGroup>
       <TunControl proxyUrl={proxyUrl} onTunStatusChange={onTunStatusChange} />
+
+      {/* Helper daemon toggle (macOS only) */}
+      {isMac && (
+        <SettingsGroup title={t('settings.useHelper')}>
+          <ToggleRow
+            label={t('settings.useHelper')}
+            checked={useHelper}
+            onChange={setUseHelper}
+          />
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>{t('settings.useHelperHint')}</div>
+        </SettingsGroup>
+      )}
 
       {/* Region selector */}
       <SettingsGroup title={t('settings.proxyRegion')}>

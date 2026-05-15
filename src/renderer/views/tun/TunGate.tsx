@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useI18n } from '../../i18n'
+import { useSettingsStore } from '../../stores/settings'
 
 type Phase = 'idle' | 'installing' | 'resolving' | 'starting' | 'testing' | 'connected' | 'failed'
 
@@ -17,6 +18,7 @@ const WORKING_PHASES: Phase[] = ['idle', 'installing', 'resolving', 'starting', 
 
 export function TunGate({ proxyUrl, tunnelUrl, exitIp, onReady, isReconnect, onRefreshConfig, onSwitchAccount }: TunGateProps) {
   const { t } = useI18n()
+  const { useHelper, setUseHelper } = useSettingsStore()
   const [phase, setPhase] = useState<Phase>('idle')
   const [error, setError] = useState<string | null>(null)
   const [latency, setLatency] = useState<number | null>(null)
@@ -135,8 +137,9 @@ export function TunGate({ proxyUrl, tunnelUrl, exitIp, onReady, isReconnect, onR
 
       // Start TUN (blocks until tunnel confirmed running or fails)
       setPhase('starting')
-      console.log(`[TunGate:${id}] starting TUN...`)
-      const startResult = await window.api.tun.startTun(resolveResult.resolved, tunnelUrlRef.current || undefined)
+      const helperPref = useSettingsStore.getState().useHelper
+      console.log(`[TunGate:${id}] starting TUN... (useHelper=${helperPref})`)
+      const startResult = await window.api.tun.startTun(resolveResult.resolved, tunnelUrlRef.current || undefined, helperPref)
       console.log(`[TunGate:${id}] startTun result: success=${startResult.success}, error=${startResult.error}`)
       if (!startResult.success) {
         setPhase('failed')
@@ -326,6 +329,23 @@ export function TunGate({ proxyUrl, tunnelUrl, exitIp, onReady, isReconnect, onR
               }}
             >
               {isAuthDenied ? (t('tun.authorize') || 'Authorize & Retry') : t('tun.retry')}
+            </button>
+          )}
+
+          {/* Switch to password mode — shown on AUTH_DENIED when helper is enabled */}
+          {isFailed && isAuthDenied && useHelper && (
+            <button
+              onClick={() => {
+                setUseHelper(false)
+                connect(true)
+              }}
+              style={{
+                padding: '7px 16px', fontSize: 13, fontWeight: 500,
+                background: 'transparent', color: 'var(--accent)',
+                border: '1px solid var(--accent)', borderRadius: 8, cursor: 'pointer',
+              }}
+            >
+              {t('tun.switchToPassword') || 'Use Password Mode'}
             </button>
           )}
 

@@ -643,7 +643,7 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
    */
   private _stopRequested = false
 
-  async startTun(proxyUrl: string): Promise<void> {
+  async startTun(proxyUrl: string, opts?: { useHelper?: boolean }): Promise<void> {
     // Mutex: if already starting, await the existing promise
     if (this._startPromise) {
       log.info(`[sing-box] startTun — already starting, awaiting existing promise`)
@@ -653,7 +653,7 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
     }
 
     this._stopRequested = false
-    this._startPromise = this._startTunImpl(proxyUrl)
+    this._startPromise = this._startTunImpl(proxyUrl, opts)
     try {
       const result = await this._startPromise
       if (result.error) throw new Error(result.error)
@@ -674,7 +674,7 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
     }
   }
 
-  private async _startTunImpl(proxyUrl: string): Promise<{ success?: boolean; error?: string }> {
+  private async _startTunImpl(proxyUrl: string, opts?: { useHelper?: boolean }): Promise<{ success?: boolean; error?: string }> {
     try {
       await this.reconcileStatus()
 
@@ -716,7 +716,12 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
       this._status = 'starting'
 
       if (os.platform() === 'darwin') {
-        await this.startViaHelper()
+        if (opts?.useHelper === false) {
+          log.info('[sing-box] useHelper=false, using osascript sudo directly')
+          await this.startWithSudoFallback()
+        } else {
+          await this.startViaHelper()
+        }
       } else if (os.platform() === 'win32') {
         await this.startWithAdmin()
       } else {

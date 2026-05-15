@@ -104,6 +104,8 @@ export const en = {
   'settings.proxyRegionHint': 'Match timezone and locale to your proxy location to avoid detection',
   'settings.proxyStatus': 'Effective Environment Variables',
   'settings.proxyApplyHint': 'Applied to new terminal tabs. Existing tabs are not affected.',
+  'settings.useHelper': 'Helper Daemon (no password per start)',
+  'settings.useHelperHint': 'Uses a privileged helper for TUN. Disable to enter password each time.',
 
   // Welcome
   'welcome.openFolder': 'Open Working Directory',
@@ -224,6 +226,7 @@ export const en = {
   'tun.cancel': 'Cancel',
   'tun.refreshConfig': 'Refresh Config',
   'tun.switchAccount': 'Switch Account',
+  'tun.switchToPassword': 'Use Password Mode',
   'tun.disconnected': 'Network disconnected. Reconnect to continue.',
 
   // Stats

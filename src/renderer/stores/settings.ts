@@ -29,6 +29,7 @@ interface SettingsState {
   proxySubNodeUrl: string                // resolved URL of selected subscription node
   proxySelectedNode: string              // selected node name (subscription mode)
   proxyRegion: string
+  useHelper: boolean                     // macOS: use privileged helper daemon (true) or osascript sudo (false)
 
   serverUrl: string                      // subscription API base override (empty = default)
 
@@ -52,6 +53,7 @@ interface SettingsState {
   setProxySubNodeUrl: (v: string) => void
   setProxySelectedNode: (v: string) => void
   setProxyRegion: (v: string) => void
+  setUseHelper: (v: boolean) => void
   setServerUrl: (v: string) => void
 }
 
@@ -84,6 +86,7 @@ function persistSettings(state: SettingsState) {
       proxyMode: state.proxyMode,
       proxySelectedNode: state.proxySelectedNode,
       proxyRegion: state.proxyRegion,
+      useHelper: state.useHelper,
       serverUrl: state.serverUrl,
     }))
   } catch { /* ignore */ }
@@ -138,6 +141,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   proxySubNodeUrl: '',         // loaded from encrypted session.json on startup, not localStorage
   proxySelectedNode: typeof (saved as any).proxySelectedNode === 'string' ? (saved as any).proxySelectedNode : '',
   proxyRegion: typeof (saved as any).proxyRegion === 'string' ? (saved as any).proxyRegion : 'us',
+  useHelper: typeof (saved as any).useHelper === 'boolean' ? (saved as any).useHelper : true,
 
   serverUrl: typeof (saved as any).serverUrl === 'string' ? (saved as any).serverUrl : '',
 
@@ -188,6 +192,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ proxyRegion: v })
     const s = get(); persistSettings(s); syncProxyToMain(s)
   },
+  setUseHelper: (v) => { set({ useHelper: v }); persistSettings(get()) },
   setServerUrl: (v) => {
     set({ serverUrl: v })
     persistSettings(get())

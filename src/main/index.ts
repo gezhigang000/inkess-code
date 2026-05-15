@@ -528,7 +528,8 @@ async function probeDirectProxy(proxyUrl: string): Promise<boolean> {
  * any), picks the best tunnel node, and starts sing-box. Throws on failure
  * so callers can do their own error reporting / IPC return value.
  */
-async function startTunInternal(proxyUrl: string, tunnelUrl?: string): Promise<void> {
+async function startTunInternal(proxyUrl: string, tunnelUrl?: string, useHelper?: boolean): Promise<void> {
+  if (typeof useHelper === 'boolean') lastUseHelper = useHelper
   if (typeof proxyUrl !== 'string' || proxyUrl.length > 500 || proxyUrl.length < 5) {
     log.error(`[startTun] invalid proxy URL (len=${proxyUrl?.length})`)
     throw new Error('Invalid proxy URL')
@@ -580,7 +581,7 @@ async function startTunInternal(proxyUrl: string, tunnelUrl?: string): Promise<v
     singBoxManager.setTunnelOutbound(undefined)
   }
 
-  await singBoxManager.startTun(proxyUrl)
+  await singBoxManager.startTun(proxyUrl, { useHelper })
   log.info(`[startTun] success`)
   statsCollector.logEvent('tun:start')
 
@@ -591,11 +592,11 @@ async function startTunInternal(proxyUrl: string, tunnelUrl?: string): Promise<v
   })
 }
 
-ipcMain.handle('tun:startTun', async (_event, proxyUrl: string, tunnelUrl?: string) => {
+ipcMain.handle('tun:startTun', async (_event, proxyUrl: string, tunnelUrl?: string, useHelper?: boolean) => {
   if (MOCK_MODE) return { success: true }
   proxyUrl = typeof proxyUrl === 'string' ? proxyUrl.trim() : proxyUrl
   try {
-    await startTunInternal(proxyUrl, tunnelUrl)
+    await startTunInternal(proxyUrl, tunnelUrl, useHelper)
     return { success: true }
   } catch (err) {
     log.error(`[startTun] error:`, err)
@@ -623,7 +624,7 @@ ipcMain.handle('tun:reconnect', async () => {
   try {
     // stop(false) = skip DNS restore; we're about to re-hijack immediately
     await singBoxManager.stop(false)
-    await startTunInternal(session.proxyUrl, session.tunnelUrl)
+    await startTunInternal(session.proxyUrl, session.tunnelUrl, lastUseHelper)
     log.info('[reconnect] success')
     return { success: true }
   } catch (err) {
@@ -726,6 +727,9 @@ interface ProxySettings {
 }
 
 let proxySettings: ProxySettings = { enabled: false, url: '', region: 'us' }
+
+/** Last useHelper preference from renderer — used by reconnect to match the same mode */
+let lastUseHelper: boolean | undefined
 
 // Claude credentials — in-memory only, never persisted to disk
 let claudeCredentials: { email: string; password: string } | null = null

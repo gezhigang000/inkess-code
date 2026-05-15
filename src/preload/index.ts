@@ -158,7 +158,7 @@ const api = {
       internetReachable: boolean | null; latencyMs: number | null
     }>,
     install: () => ipcRenderer.invoke('tun:install') as Promise<{ success: boolean; error?: string }>,
-    startTun: (proxyUrl: string, tunnelUrl?: string) => ipcRenderer.invoke('tun:startTun', proxyUrl, tunnelUrl) as Promise<{ success: boolean; error?: string }>,
+    startTun: (proxyUrl: string, tunnelUrl?: string, useHelper?: boolean) => ipcRenderer.invoke('tun:startTun', proxyUrl, tunnelUrl, useHelper) as Promise<{ success: boolean; error?: string }>,
     reconnect: () => ipcRenderer.invoke('tun:reconnect') as Promise<{ success: boolean; error?: string }>,
     stop: () => ipcRenderer.invoke('tun:stop') as Promise<{ success: boolean }>,
     clearAuthCooldown: () => ipcRenderer.invoke('tun:clearAuthCooldown') as Promise<void>,
