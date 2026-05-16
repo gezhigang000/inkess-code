@@ -90,6 +90,9 @@ export class SingBoxManager {
    *  — no need to wait for a 5s renderer poll. Set up lazily once the helper
    *  is confirmed available; cleaned up on dispose. */
   private _helperSubscription: { close: () => void } | null = null
+  /** Consecutive helper getStatus() failures — after threshold, degrade gracefully. */
+  private _helperConsecutiveFailures = 0
+  private static readonly HELPER_FAILURE_THRESHOLD = 5
 
   constructor() {
     this.singboxDir = join(app.getPath('userData'), 'sing-box')
@@ -414,6 +417,21 @@ export class SingBoxManager {
    * Windows: uses PowerShell UAC.
    */
   private async cleanupStaleNetworkState(): Promise<void> {
+    const CLEANUP_TIMEOUT_MS = 20_000
+    try {
+      await Promise.race([
+        this._cleanupStaleNetworkStateImpl(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('stale network cleanup timed out')), CLEANUP_TIMEOUT_MS),
+        ),
+      ])
+    } catch (err) {
+      log.error(`[sing-box] cleanupStaleNetworkState failed/timed out: ${(err as Error).message}`)
+      this._hasStaleNetworkState = true
+    }
+  }
+
+  private async _cleanupStaleNetworkStateImpl(): Promise<void> {
     const stale = this.detectStaleNetworkState()
     if (!stale.hasResiduals) {
       this._hasStaleNetworkState = false
@@ -488,7 +506,7 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
     try {
       execSync(
         `osascript -e 'do shell script "${fullScript.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}" with administrator privileges'`,
-        { timeout: 30000, stdio: 'pipe' },
+        { timeout: 15000, stdio: 'pipe' },
       )
       log.info('[sing-box] stale network state cleanup complete (osascript fallback)')
       this._hasStaleNetworkState = false
@@ -525,13 +543,13 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
   // DNS setup is handled by the helper daemon (setDns RPC) or inside the
   // osascript fallback shell command. See startViaHelper() / startWithSudoFallback().
 
-  /** Restore macOS system DNS to default. Uses helper daemon (no sudo prompt). */
-  private restoreSystemDns(): void {
+  /** Restore macOS system DNS to default. Awaits helper, falls back to osascript. */
+  private async restoreSystemDns(): Promise<void> {
     if (os.platform() !== 'darwin') return
-    // Fire-and-forget via helper — async but we don't await in _stopImpl
-    this._helperClient.restoreDns().catch((err) => {
-      log.warn(`[sing-box] helper DNS restore failed, trying osascript fallback: ${err.message}`)
-      // Fallback to osascript if helper is unavailable
+    try {
+      await this._helperClient.restoreDns()
+    } catch (err) {
+      log.warn(`[sing-box] helper DNS restore failed, trying osascript fallback: ${(err as Error).message}`)
       try {
         const cmd = `scutil <<EOF
 remove State:/Network/Service/sing-box-tun/DNS
@@ -543,9 +561,10 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
         )
         log.info('[sing-box] system DNS restored (osascript fallback)')
       } catch (fallbackErr) {
-        log.warn(`[sing-box] failed to restore system DNS: ${(fallbackErr as Error).message}`)
+        log.error(`[sing-box] CRITICAL: failed to restore system DNS: ${(fallbackErr as Error).message}`)
+        this._lastError = 'DNS_RESTORE_FAILED: System DNS may be misconfigured. Check Network settings.'
       }
-    })
+    }
   }
 
   private async _stopImpl(restoreDns: boolean): Promise<void> {
@@ -586,7 +605,7 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
     }
 
     // Non-helper path (Windows, Linux, or helper unavailable)
-    if (restoreDns) this.restoreSystemDns()
+    if (restoreDns) await this.restoreSystemDns()
     await this._stopImplManual(restoreDns)
   }
 
@@ -696,6 +715,11 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
         await this.cleanupStaleNetworkState()
       }
 
+      if (this._stopRequested) {
+        log.info(`[sing-box] startTun aborted — stop requested after stale cleanup`)
+        return { error: 'Start cancelled — stop requested' }
+      }
+
       log.info(`[sing-box] building TUN config for proxy: ${proxyUrl.replace(/:\/\/([^:@]+):([^@]+)@/, '://$1:***@')}`)
       const logOutput = join(this.singboxDir, 'sing-box.log')
       // Resolve rule-set directory (pre-bundled geosite-cn.srs + geoip-cn.srs)
@@ -708,9 +732,17 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
         ruleSetDir: existsSync(join(ruleSetDir, 'geosite-cn.srs')) ? ruleSetDir : undefined,
       })
       this.writeConfig(config)
+      await this.validateConfig()
       const mode = this._tunnelOutbound ? 'chain (tunnel → proxy)' : 'single proxy'
       log.info(`[sing-box] config written: mode=${mode}, stack=${config.inbounds[0]?.stack}, dns=${config.dns.servers.map(s => s.tag + ':' + s.address).join(', ')}`)
       log.info(`[sing-box] outbound: type=${config.outbounds[0]?.type}, server=${config.outbounds[0]?.server}:${config.outbounds[0]?.server_port}, username=${config.outbounds[0]?.username ? 'set' : 'none'}`)
+
+      if (this._stopRequested) {
+        log.info(`[sing-box] startTun aborted — stop requested after config validation`)
+        this._mode = 'off'
+        this._status = 'stopped'
+        return { error: 'Start cancelled — stop requested' }
+      }
 
       this._mode = 'tun'
       this._status = 'starting'
@@ -815,6 +847,7 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
       if (this._helperAuthoritative) {
         try {
           const status = await this._helperClient.getStatus()
+          this._helperConsecutiveFailures = 0
           if (status.ok && status.singbox_running) {
             if (this._status !== 'running') {
               this._status = 'running'
@@ -831,12 +864,18 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
           }
           return
         } catch (err) {
-          // Helper unreachable mid-session (launchd bouncing, socket
-          // permission glitch). Don't drop _status — keep the last known
-          // value and rely on the next reconcile. Falling through to the
-          // PID-file path would be wrong: helper-mode sing-box does NOT
-          // write the PID file, so we'd flip to "stopped" incorrectly.
-          log.warn(`[sing-box] reconcile (helper) failed, keeping last state: ${(err as Error).message}`)
+          this._helperConsecutiveFailures++
+          if (this._helperConsecutiveFailures >= SingBoxManager.HELPER_FAILURE_THRESHOLD) {
+            log.error(`[sing-box] reconcile: helper unreachable for ${this._helperConsecutiveFailures} consecutive attempts — marking stopped`)
+            this._status = 'stopped'
+            this._mode = 'off'
+            this._lastError = 'Helper daemon unreachable — TUN status unknown'
+            this._helperAuthoritative = false
+            this._helperConsecutiveFailures = 0
+            this.emitStatus(null, this._lastError)
+          } else {
+            log.warn(`[sing-box] reconcile (helper) failed (${this._helperConsecutiveFailures}/${SingBoxManager.HELPER_FAILURE_THRESHOLD}), keeping last state: ${(err as Error).message}`)
+          }
           return
         }
       }
@@ -1340,6 +1379,18 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
     writeFileSync(this.configPath, JSON.stringify(config, null, 2), { mode: 0o600 })
   }
 
+  /** Pre-flight config validation via `sing-box check`. Catches malformed configs
+   *  before attempting TUN start (which would crash sing-box with opaque errors). */
+  private async validateConfig(): Promise<void> {
+    try {
+      await execFileAsync(this.binaryPath, ['check', '-c', this.configPath], { timeout: 10_000 })
+      log.info('[sing-box] config validation passed')
+    } catch (err: any) {
+      const stderr = err.stderr?.toString?.() || err.message || 'unknown error'
+      throw new Error(`Config validation failed: ${stderr.slice(0, 500)}`)
+    }
+  }
+
   private async ensureInstalled(): Promise<void> {
     if (!this.isInstalled() || !this.isVersionMatch()) {
       log.info(`SingBox: need install/upgrade to ${SINGBOX_VERSION}`)
@@ -1426,6 +1477,13 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
     } catch (err) {
       log.error(`[sing-box] helper start failed: ${(err as Error).message}`)
       throw err
+    }
+
+    // Abort gate: if stop was requested while helper was starting, roll back
+    if (this._stopRequested) {
+      log.info('[sing-box] startViaHelper: stop requested after start, stopping immediately')
+      await this._helperClient.stop().catch(() => {})
+      throw new Error('Start cancelled — stop requested during helper start')
     }
 
     // Set DNS via helper

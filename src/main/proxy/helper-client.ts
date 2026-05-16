@@ -88,6 +88,35 @@ export class HelperClient {
   }
 
   /**
+   * Send a request with automatic retry on transient socket errors.
+   * Handles helper daemon restarts (launchd KeepAlive bounce ~500ms).
+   */
+  private async sendWithRetry(
+    request: HelperRequest,
+    retries = 3,
+    delayMs = 500,
+  ): Promise<HelperResponse> {
+    let lastError: Error | null = null
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        return await this.send(request)
+      } catch (err) {
+        lastError = err as Error
+        const msg = lastError.message
+        const isTransient =
+          msg.includes('ECONNREFUSED') ||
+          msg.includes('ENOENT') ||
+          msg.includes('socket error') ||
+          msg.includes('closed connection without response')
+        if (!isTransient || attempt === retries) break
+        log.debug(`[helper] ${request.op} attempt ${attempt}/${retries} failed (${msg}), retrying in ${delayMs}ms...`)
+        await new Promise(r => setTimeout(r, delayMs))
+      }
+    }
+    throw lastError!
+  }
+
+  /**
    * Send a request to the helper and return the parsed response.
    * Each call opens a new connection (matches the Rust helper's per-connection model).
    */
@@ -164,12 +193,12 @@ export class HelperClient {
 
   /** Get helper version and uptime. */
   async getInfo(): Promise<HelperInfoResponse> {
-    return await this.send({ op: 'info' }) as HelperInfoResponse
+    return await this.sendWithRetry({ op: 'info' }) as HelperInfoResponse
   }
 
   /** Get sing-box process status from the helper. */
   async getStatus(): Promise<HelperStatusResponse> {
-    return await this.send({ op: 'status' }) as HelperStatusResponse
+    return await this.sendWithRetry({ op: 'status' }) as HelperStatusResponse
   }
 
   /**
@@ -178,7 +207,7 @@ export class HelperClient {
    * and starts a watchdog monitoring `appPid`.
    */
   async start(binaryPath: string, configPath: string, appPid: number): Promise<void> {
-    const resp = await this.send({
+    const resp = await this.sendWithRetry({
       op: 'start',
       binary_path: binaryPath,
       config_path: configPath,
@@ -192,7 +221,7 @@ export class HelperClient {
 
   /** Ask the helper to stop sing-box (SIGTERM → SIGKILL escalation). */
   async stop(): Promise<void> {
-    const resp = await this.send({ op: 'stop' })
+    const resp = await this.sendWithRetry({ op: 'stop' })
     if (!resp.ok) {
       throw new Error(resp.error || 'helper: stop failed')
     }
@@ -201,7 +230,7 @@ export class HelperClient {
 
   /** Set system DNS via scutil (runs as root in the helper). */
   async setDns(server: string): Promise<void> {
-    const resp = await this.send({ op: 'set_dns', server })
+    const resp = await this.sendWithRetry({ op: 'set_dns', server })
     if (!resp.ok) {
       throw new Error(resp.error || 'helper: set_dns failed')
     }
@@ -210,7 +239,7 @@ export class HelperClient {
 
   /** Restore system DNS to default via scutil. */
   async restoreDns(): Promise<void> {
-    const resp = await this.send({ op: 'restore_dns' })
+    const resp = await this.sendWithRetry({ op: 'restore_dns' })
     if (!resp.ok) {
       throw new Error(resp.error || 'helper: restore_dns failed')
     }
@@ -255,6 +284,9 @@ export class HelperClient {
       socket = net.connect({ path: this.socketPath })
 
       socket.on('connect', () => {
+        // Socket connected — helper is listening. Cap backoff to reduce
+        // blind time if we disconnect again before receiving the ack.
+        backoffMs = Math.min(backoffMs, 2000)
         socket!.write(JSON.stringify({ op: 'subscribe' }) + '\n')
       })
 
