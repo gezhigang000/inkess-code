@@ -25,7 +25,7 @@ export const ENGINE_SPECS: Record<Engine, EngineSpec> = {
     engine: 'claude',
     subdir: 'claude',
     displayName: 'Claude Code',
-    mirrorBase: 'https://inkess-app.oss-ap-northeast-1.aliyuncs.com/cli-mirror',
+    mirrorBase: 'https://download.inkessai.com/cli-mirror',
     unixBinary: 'claude',
     winBinary: 'claude.exe',
   },

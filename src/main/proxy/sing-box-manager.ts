@@ -47,7 +47,7 @@ function resetProbeAgent(): void {
 const SYSTEM_DNS_OVERRIDE = '8.8.8.8'
 
 const SINGBOX_VERSION = '1.11.15'
-const SINGBOX_DOWNLOAD_BASE = 'https://inkess-app.oss-ap-northeast-1.aliyuncs.com/singbox-mirror'
+const SINGBOX_DOWNLOAD_BASE = 'https://download.inkessai.com/singbox-mirror'
 
 type SingBoxMode = 'tun' | 'local-proxy' | 'off'
 
