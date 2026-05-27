@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, rmSync } from 'fs'
-import { join } from 'path'
+import { join, resolve, sep } from 'path'
 import type { ChatMeta, ChatsIndex } from './chat-types'
 
 /**
@@ -55,7 +55,8 @@ export class ChatStore {
     const id = randomUUID()
     const dataDir = join(this.workspaceDir, id)
     mkdirSync(dataDir, { recursive: true })
-    const cwd = o.cwd || dataDir
+    const mountedDirs = typeof o.cwd === 'string' && o.cwd.length > 0 ? [o.cwd] : []
+    const cwd = dataDir
 
     const now = Date.now()
     const meta: ChatMeta = {
@@ -64,7 +65,7 @@ export class ChatStore {
       createdAt: now,
       updatedAt: now,
       cwd,
-      mountedDirs: [],
+      mountedDirs,
       claudeSessionId: null,
       cliVersion: this.cliVersion,
       messageCount: 0,
@@ -99,13 +100,19 @@ export class ChatStore {
     this.chats.splice(i, 1)
     await this.writeIndex()
 
-    if (opts.removeFiles) {
+    if (opts.removeFiles && this.isManagedWorkspacePath(victim.cwd)) {
       try {
         rmSync(victim.cwd, { recursive: true, force: true })
       } catch {
         // Swallow — index already reflects the deletion
       }
     }
+  }
+
+  private isManagedWorkspacePath(path: string): boolean {
+    const root = resolve(this.workspaceDir)
+    const target = resolve(path)
+    return target.startsWith(root + sep)
   }
 
   private readIndex(): ChatMeta[] {

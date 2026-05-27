@@ -17,14 +17,15 @@ describe('ChatStore.create() with custom cwd', () => {
     await store.init()
   })
 
-  it('uses custom cwd when provided', async () => {
+  it('keeps app workspace as cwd and stores provided project as a mounted dir', async () => {
     const customDir = mkdtempSync(join(tmpdir(), 'custom-cwd-'))
     const meta = await store.create(customDir)
-    expect(meta.cwd).toBe(customDir)
-    // dataDir (ai-workspace/{id}) should still be created for internal use
     const base = (store as any).baseDir as string
-    const dataDir = join(base, 'ai-workspace', meta.id)
-    expect(existsSync(dataDir)).toBe(true)
+    const expectedWorkspace = join(base, 'ai-workspace', meta.id)
+
+    expect(meta.cwd).toBe(expectedWorkspace)
+    expect(meta.mountedDirs).toEqual([customDir])
+    expect(existsSync(expectedWorkspace)).toBe(true)
   })
 
   it('falls back to ai-workspace/{id} when no cwd provided', async () => {
@@ -40,7 +41,7 @@ describe('ChatStore.create() with custom cwd', () => {
     expect(meta.cwd).toContain('ai-workspace')
   })
 
-  it('custom cwd is persisted and survives reload', async () => {
+  it('mounted custom project is persisted and survives reload', async () => {
     const customDir = mkdtempSync(join(tmpdir(), 'custom-cwd-'))
     const meta = await store.create(customDir)
 
@@ -48,41 +49,46 @@ describe('ChatStore.create() with custom cwd', () => {
     const reload = new ChatStore(base, '2.1.98')
     await reload.init()
     const reloaded = reload.get(meta.id)
+
     expect(reloaded).toBeDefined()
-    expect(reloaded!.cwd).toBe(customDir)
+    expect(reloaded!.cwd).toBe(join(base, 'ai-workspace', meta.id))
+    expect(reloaded!.mountedDirs).toEqual([customDir])
   })
 
   it('custom cwd is still immutable via update()', async () => {
     const customDir = mkdtempSync(join(tmpdir(), 'custom-cwd-'))
     const meta = await store.create(customDir)
+    const base = (store as any).baseDir as string
+    const expectedWorkspace = join(base, 'ai-workspace', meta.id)
+
     await store.update(meta.id, { cwd: '/tmp/evil' } as any)
+
     const after = store.get(meta.id)!
-    expect(after.cwd).toBe(customDir) // unchanged
+    expect(after.cwd).toBe(expectedWorkspace)
+    expect(after.mountedDirs).toEqual([customDir])
   })
 
-  it('delete(removeFiles=true) with custom cwd does not delete external dir', async () => {
-    // When cwd points to a user project (not ai-workspace), deleting the chat
-    // should NOT nuke the user's project. The ai-workspace/{id} dataDir can be
-    // deleted, but the custom cwd should survive.
-    //
-    // NOTE: Currently chat-store.ts deletes `meta.cwd` on removeFiles=true.
-    // This test documents the current behavior. If custom cwd support is used
-    // for user project dirs, we may want to change this behavior later.
+  it('delete(removeFiles=true) removes only app workspace and keeps mounted external dir', async () => {
     const customDir = mkdtempSync(join(tmpdir(), 'custom-cwd-'))
     const meta = await store.create(customDir)
+    const workspace = meta.cwd
+
     await store.delete(meta.id, { removeFiles: true })
-    // Current behavior: meta.cwd IS deleted (even if external).
-    // This is acceptable for now since the drawer creates chats with terminal cwd,
-    // and the user can always recreate. Just document it.
+
     expect(store.get(meta.id)).toBeUndefined()
+    expect(existsSync(workspace)).toBe(false)
+    expect(existsSync(customDir)).toBe(true)
   })
 
-  it('multiple chats can share the same custom cwd', async () => {
+  it('multiple chats can mount the same project while keeping separate workspaces', async () => {
     const sharedDir = mkdtempSync(join(tmpdir(), 'shared-cwd-'))
     const a = await store.create(sharedDir)
     const b = await store.create(sharedDir)
-    expect(a.cwd).toBe(sharedDir)
-    expect(b.cwd).toBe(sharedDir)
-    expect(a.id).not.toBe(b.id)
+
+    expect(a.cwd).not.toBe(sharedDir)
+    expect(b.cwd).not.toBe(sharedDir)
+    expect(a.cwd).not.toBe(b.cwd)
+    expect(a.mountedDirs).toEqual([sharedDir])
+    expect(b.mountedDirs).toEqual([sharedDir])
   })
 })

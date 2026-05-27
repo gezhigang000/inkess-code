@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
+import { randomUUID } from 'crypto'
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -65,6 +66,38 @@ describe('ChatStore', () => {
     await store.delete(m.id, { removeFiles: true })
     expect(store.get(m.id)).toBeUndefined()
     expect(existsSync(m.cwd)).toBe(false)
+  })
+
+  it('delete(removeFiles=true) does not remove legacy external cwd entries', async () => {
+    await store.init()
+    const base = (store as any).baseDir as string
+    const externalDir = mkdtempSync(join(tmpdir(), 'legacy-external-cwd-'))
+    const now = Date.now()
+    const legacy = {
+      id: randomUUID(),
+      title: 'Legacy chat',
+      createdAt: now,
+      updatedAt: now,
+      cwd: externalDir,
+      mountedDirs: [],
+      claudeSessionId: null,
+      cliVersion: '2.1.98',
+      messageCount: 0,
+      starred: false,
+      engine: 'claude' as const,
+    }
+
+    writeFileSync(
+      join(base, 'chats', 'index.json'),
+      JSON.stringify({ version: 1, chats: [legacy] }, null, 2),
+    )
+
+    const reload = new ChatStore(base, '2.1.98')
+    await reload.init()
+    await reload.delete(legacy.id, { removeFiles: true })
+
+    expect(reload.get(legacy.id)).toBeUndefined()
+    expect(existsSync(externalDir)).toBe(true)
   })
 
   it('delete(removeFiles=false) removes index entry but keeps cwd', async () => {

@@ -2,7 +2,7 @@ import { ipcMain, type BrowserWindow } from 'electron'
 import log from '../logger'
 import type { ChatManager } from './chat-manager'
 import type { ChatStore } from './chat-store'
-import { validateChatId, validateText } from './validators'
+import { validateChatId, validateDirPath, validateText } from './validators'
 import { loadHistory } from './history-loader'
 
 export interface ChatIpcDeps {
@@ -41,7 +41,11 @@ export function registerChatIPC(deps: ChatIpcDeps): void {
 
   ipcMain.handle('chat:create', async (_event, args?: unknown) => {
     const a = args as { cwd?: string; engine?: string } | undefined
-    const cwd = typeof a?.cwd === 'string' && a.cwd.length > 0 ? a.cwd : undefined
+    let cwd: string | undefined
+    if (typeof a?.cwd === 'string' && a.cwd.length > 0) {
+      validateDirPath(a.cwd)
+      cwd = a.cwd
+    }
     const engine = a?.engine === 'codex' ? 'codex' : 'claude'
     const meta = await store.create({ cwd, engine })
     broadcastListChanged()
