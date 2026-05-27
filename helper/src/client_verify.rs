@@ -26,10 +26,11 @@
 //! is a separate focused effort. Phase 2 will replace this stub with the
 //! real verification once the RPC plumbing is working end-to-end.
 //!
-//! Until then, the helper checks that the connecting process's effective
-//! UID matches the expected app session UID (obtained via SO_PEERCRED-like
-//! API on macOS: `getpeereid`). This is a weaker check than code signature
-//! verification but still keeps other users on the same Mac out.
+//! Until then, the helper records the connecting process's effective
+//! UID/GID (obtained via SO_PEERCRED-like API on macOS: `getpeereid`) for
+//! logging and defense-in-depth checks such as binding sing-box runtime
+//! paths to the peer uid. This does not provide full client authentication
+//! and does not, by itself, keep other local users out.
 
 use anyhow::Result;
 
