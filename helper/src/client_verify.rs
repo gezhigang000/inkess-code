@@ -15,8 +15,10 @@
 //!   and certificate 1[field.1.2.840.113635.100.6.2.6]
 //!   and certificate leaf[field.1.2.840.113635.100.6.1.13]
 //!
-//! This check is **the** security boundary: if it passes, we trust the
-//! client to send any RPC command; if it fails, we drop the connection.
+//! The eventual code-signature check is one security boundary for RPC
+//! access. Path validation in the sing-box start path remains a separate
+//! defense-in-depth boundary because the helper runs with elevated
+//! privileges.
 //!
 //! **Current status**: this module is intentionally stubbed during Phase 1.
 //! The full implementation requires calling into Security.framework via
@@ -35,10 +37,10 @@ use crate::ipc::IpcStream;
 
 /// Verify the connecting client is allowed to send RPC commands.
 ///
-/// **Phase 1 stub**: returns Ok() for any reachable peer (uid/gid logged
-/// but not enforced). The helper itself is root/SYSTEM, so the threat
-/// surface is "any local process can talk to us" — which is what the
-/// Phase 2 code-signature check (TODO) tightens.
+/// **Phase 1 stub**: records peer identity but does not perform full
+/// code-signature authentication. The helper itself is root/SYSTEM, so
+/// the threat surface is "any local process with socket access can talk to
+/// us" — which is what the Phase 2 code-signature check (TODO) tightens.
 ///
 /// Platform notes:
 ///   - Unix:    `getpeereid(fd)` returns (uid, gid)

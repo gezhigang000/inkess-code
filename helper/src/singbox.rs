@@ -7,7 +7,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,29 +28,41 @@ const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// child in `HelperState`. Kills any previously-running sing-box first.
 ///
 /// Validates that `binary_path` and `config_path` exist and are under the
-/// Inkess Code app-managed sing-box runtime directory. Arbitrary user,
-/// application, and temp paths are rejected so the helper cannot be asked
-/// to run an unrelated binary or load an unrelated config.
+/// Inkess Code app-managed sing-box runtime directory, with Unix runtime
+/// paths bound to the verified peer uid when available. This is a
+/// defense-in-depth boundary, not full code-signature authentication:
+/// arbitrary user, application, and temp paths are rejected so the helper
+/// cannot be asked to run an unrelated binary or load an unrelated config.
 pub async fn start(
     state: Arc<Mutex<HelperState>>,
     binary_path: &str,
     config_path: &str,
     app_pid: u32,
+    peer_uid: Option<u32>,
 ) -> Result<u32> {
-    validate_path(binary_path).context("invalid binary_path")?;
-    validate_path(config_path).context("invalid config_path")?;
+    validate_binary_path(binary_path, peer_uid).context("invalid binary_path")?;
+    validate_config_path(config_path, peer_uid).context("invalid config_path")?;
+
+    validate_existing_artifact(Path::new(binary_path)).context("invalid binary_path")?;
+    validate_existing_artifact(Path::new(config_path)).context("invalid config_path")?;
 
     let binary_metadata = tokio::fs::metadata(binary_path)
         .await
         .with_context(|| format!("binary not found: {}", binary_path))?;
     if !binary_metadata.is_file() {
-        return Err(anyhow!("binary_path is not a regular file: {}", binary_path));
+        return Err(anyhow!(
+            "binary_path is not a regular file: {}",
+            binary_path
+        ));
     }
     let config_metadata = tokio::fs::metadata(config_path)
         .await
         .with_context(|| format!("config not found: {}", config_path))?;
     if !config_metadata.is_file() {
-        return Err(anyhow!("config_path is not a regular file: {}", config_path));
+        return Err(anyhow!(
+            "config_path is not a regular file: {}",
+            config_path
+        ));
     }
 
     // Stop any previous sing-box before starting a new one
@@ -284,7 +296,29 @@ pub async fn stop(state: Arc<Mutex<HelperState>>) -> Result<()> {
 /// runs as root/SYSTEM (no `$HOME` / `%USERPROFILE%`) and the client could
 /// be any user session. This allowlist is intentionally narrow: arbitrary
 /// user, application, and temp directories are not accepted.
-fn validate_path(p: &str) -> Result<()> {
+fn validate_binary_path(p: &str, peer_uid: Option<u32>) -> Result<()> {
+    validate_runtime_artifact_path(p, peer_uid, expected_binary_name())
+}
+
+fn validate_config_path(p: &str, peer_uid: Option<u32>) -> Result<()> {
+    validate_runtime_artifact_path(p, peer_uid, "config.json")
+}
+
+#[cfg(unix)]
+fn expected_binary_name() -> &'static str {
+    "sing-box"
+}
+
+#[cfg(windows)]
+fn expected_binary_name() -> &'static str {
+    "sing-box.exe"
+}
+
+fn validate_runtime_artifact_path(
+    p: &str,
+    peer_uid: Option<u32>,
+    expected_name: &str,
+) -> Result<()> {
     let path = PathBuf::from(p);
     if !path.is_absolute() {
         return Err(anyhow!("path must be absolute"));
@@ -295,33 +329,92 @@ fn validate_path(p: &str) -> Result<()> {
             return Err(anyhow!("path must not contain '..' segments"));
         }
     }
-    if !is_allowed_prefix(p) {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("path must include a file name"))?;
+    if file_name != expected_name {
+        return Err(anyhow!("path must end with {}", expected_name));
+    }
+    validate_allowed_prefix(p, peer_uid)?;
+    Ok(())
+}
+
+fn validate_existing_artifact(path: &Path) -> Result<()> {
+    reject_symlink_components(path)?;
+    Ok(())
+}
+
+fn reject_symlink_components(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        let metadata = std::fs::symlink_metadata(&current)
+            .with_context(|| format!("checking path component {}", current.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(anyhow!(
+                "path component is a symlink: {}",
+                current.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_allowed_prefix(p: &str, peer_uid: Option<u32>) -> Result<()> {
+    if !is_allowed_prefix(p, peer_uid)? {
         return Err(anyhow!("path not under an allowed prefix: {}", p));
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn is_allowed_prefix(p: &str) -> bool {
-    is_unix_inkess_singbox_runtime(p) || is_unix_test_fixture_path(p)
+fn is_allowed_prefix(p: &str, peer_uid: Option<u32>) -> Result<bool> {
+    if is_unix_test_fixture_path(p) {
+        return Ok(true);
+    }
+    let Some(home) = unix_user_home_for_inkess_singbox_runtime(p) else {
+        return Ok(false);
+    };
+    if let Some(uid) = peer_uid {
+        validate_unix_home_owner(&home, uid)?;
+    }
+    Ok(true)
 }
 
 #[cfg(unix)]
-fn is_unix_inkess_singbox_runtime(p: &str) -> bool {
+fn unix_user_home_for_inkess_singbox_runtime(p: &str) -> Option<PathBuf> {
     const USERDATA_TAILS: &[&str] = &[
         "/Library/Application Support/InkessCode/sing-box/",
         "/Library/Application Support/inkess-code/sing-box/",
     ];
-    let Some(after_users) = p.strip_prefix("/Users/") else {
-        return false;
-    };
-    let Some((user, after_user)) = after_users.split_once('/') else {
-        return false;
-    };
-    !user.is_empty()
-        && USERDATA_TAILS
+    let after_users = p.strip_prefix("/Users/")?;
+    let (user, after_user) = after_users.split_once('/')?;
+    if user.is_empty()
+        || !USERDATA_TAILS
             .iter()
             .any(|tail| after_user.starts_with(tail.strip_prefix('/').unwrap_or(tail)))
+    {
+        return None;
+    }
+    Some(PathBuf::from(format!("/Users/{}", user)))
+}
+
+#[cfg(unix)]
+fn validate_unix_home_owner(home: &Path, peer_uid: u32) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(home)
+        .with_context(|| format!("checking owner for user home {}", home.display()))?;
+    let owner_uid = metadata.uid();
+    if owner_uid != peer_uid {
+        return Err(anyhow!(
+            "user home owner uid {} does not match peer uid {}",
+            owner_uid,
+            peer_uid
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -330,7 +423,7 @@ fn is_unix_test_fixture_path(p: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn is_allowed_prefix(p: &str) -> bool {
+fn is_allowed_prefix(p: &str, _peer_uid: Option<u32>) -> Result<bool> {
     let lower = p.to_ascii_lowercase().replace('/', "\\");
     let after_drive = if lower.len() >= 3
         && lower.as_bytes()[1] == b':'
@@ -341,7 +434,7 @@ fn is_allowed_prefix(p: &str) -> bool {
         lower.as_str()
     };
 
-    is_windows_inkess_singbox_runtime(after_drive) || is_windows_test_fixture_path(after_drive)
+    Ok(is_windows_inkess_singbox_runtime(after_drive) || is_windows_test_fixture_path(after_drive))
 }
 
 #[cfg(windows)]
@@ -373,52 +466,120 @@ mod tests {
 
     #[test]
     fn validate_path_accepts_inkess_code_singbox_runtime_paths() {
-        assert!(validate_path(
-            "/Users/alice/Library/Application Support/InkessCode/sing-box/sing-box"
+        assert!(validate_binary_path(
+            "/Users/alice/Library/Application Support/InkessCode/sing-box/sing-box",
+            None
         )
         .is_ok());
-        assert!(validate_path(
-            "/Users/alice/Library/Application Support/InkessCode/sing-box/config.json"
+        assert!(validate_config_path(
+            "/Users/alice/Library/Application Support/InkessCode/sing-box/config.json",
+            None
         )
         .is_ok());
-        assert!(validate_path(
-            "/Users/alice/Library/Application Support/inkess-code/sing-box/sing-box"
+        assert!(validate_binary_path(
+            "/Users/alice/Library/Application Support/inkess-code/sing-box/sing-box",
+            None
         )
         .is_ok());
     }
 
     #[test]
     fn validate_path_rejects_broad_user_application_and_temp_paths() {
-        assert!(validate_path("/Users/alice/Downloads/sing-box").is_err());
-        assert!(validate_path(
-            "/Users/alice/Downloads/Library/Application Support/InkessCode/sing-box/sing-box"
+        assert!(validate_binary_path("/Users/alice/Downloads/sing-box", None).is_err());
+        assert!(validate_binary_path(
+            "/Users/alice/Downloads/Library/Application Support/InkessCode/sing-box/sing-box",
+            None
         )
         .is_err());
-        assert!(validate_path("/Applications/SomeOther.app/Contents/MacOS/sing-box").is_err());
-        assert!(validate_path("/tmp/inkess-evil/sing-box").is_err());
-        assert!(validate_path("/private/tmp/inkess-evil/sing-box").is_err());
-        assert!(validate_path("/private/var/folders/zz/evil/sing-box").is_err());
+        assert!(
+            validate_binary_path("/Applications/SomeOther.app/Contents/MacOS/sing-box", None)
+                .is_err()
+        );
+        assert!(validate_binary_path("/tmp/inkess-evil/sing-box", None).is_err());
+        assert!(validate_binary_path("/private/tmp/inkess-evil/sing-box", None).is_err());
+        assert!(validate_binary_path("/private/var/folders/zz/evil/sing-box", None).is_err());
+    }
+
+    #[test]
+    fn validate_path_rejects_arbitrary_files_under_runtime_dir() {
+        assert!(validate_binary_path(
+            "/Users/alice/Library/Application Support/InkessCode/sing-box/evil",
+            None
+        )
+        .is_err());
+        assert!(validate_config_path(
+            "/Users/alice/Library/Application Support/InkessCode/sing-box/evil.json",
+            None
+        )
+        .is_err());
     }
 
     #[test]
     fn validate_path_accepts_test_fixture_path_only_in_tests() {
-        assert!(validate_path("/tmp/inkess-helper-test/sing-box").is_ok());
-        assert!(validate_path("/tmp/inkess-helper-test/config.json").is_ok());
+        assert!(validate_binary_path("/tmp/inkess-helper-test/sing-box", None).is_ok());
+        assert!(validate_config_path("/tmp/inkess-helper-test/config.json", None).is_ok());
     }
 
     #[test]
     fn validate_path_reject_traversal() {
-        assert!(validate_path("/Users/alice/../root/.ssh/id_rsa").is_err());
+        assert!(validate_binary_path("/Users/alice/../root/.ssh/id_rsa", None).is_err());
     }
 
     #[test]
     fn validate_path_reject_relative() {
-        assert!(validate_path("sing-box/config.json").is_err());
+        assert!(validate_config_path("sing-box/config.json", None).is_err());
     }
 
     #[test]
     fn validate_path_reject_system_paths() {
-        assert!(validate_path("/etc/passwd").is_err());
-        assert!(validate_path("/bin/sh").is_err());
+        assert!(validate_config_path("/etc/passwd", None).is_err());
+        assert!(validate_binary_path("/bin/sh", None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_path_rejects_symlink_artifacts() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = PathBuf::from(format!("/tmp/inkess-helper-test/symlink-{}", unique));
+        fs::create_dir_all(&dir).unwrap();
+        let outside = dir.join("outside");
+        fs::write(&outside, "not sing-box").unwrap();
+        let link = dir.join("sing-box");
+        symlink(&outside, &link).unwrap();
+
+        assert!(validate_existing_artifact(&link).is_err());
+
+        let _ = fs::remove_file(&link);
+        let _ = fs::remove_file(&outside);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_path_checks_unix_home_owner_against_peer_uid() {
+        use std::fs;
+        use std::os::unix::fs::MetadataExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = PathBuf::from(format!("/tmp/inkess-helper-test/owner-{}", unique));
+        fs::create_dir_all(&dir).unwrap();
+        let owner_uid = fs::metadata(&dir).unwrap().uid();
+        let wrong_uid = owner_uid.wrapping_add(1);
+
+        assert!(validate_unix_home_owner(&dir, owner_uid).is_ok());
+        assert!(validate_unix_home_owner(&dir, wrong_uid).is_err());
+
+        let _ = fs::remove_dir(&dir);
     }
 }

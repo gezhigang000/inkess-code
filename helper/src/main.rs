@@ -151,7 +151,7 @@ async fn handle_client(stream: IpcStream, state: Arc<Mutex<HelperState>>) -> Res
             return run_subscriber_loop(reader, rx).await;
         }
 
-        let resp = dispatch(req, state.clone()).await;
+        let resp = dispatch(req, state.clone(), client.peer_uid).await;
         write_response(reader.get_mut(), &resp).await?;
     }
 
@@ -227,13 +227,15 @@ fn redact_op(req: &Request) -> &'static str {
     }
 }
 
-async fn dispatch(req: Request, state: Arc<Mutex<HelperState>>) -> Response {
+async fn dispatch(req: Request, state: Arc<Mutex<HelperState>>, peer_uid: Option<u32>) -> Response {
     match req {
         Request::Start {
             binary_path,
             config_path,
             app_pid,
-        } => match singbox::start(state.clone(), &binary_path, &config_path, app_pid).await {
+        } => match singbox::start(state.clone(), &binary_path, &config_path, app_pid, peer_uid)
+            .await
+        {
             Ok(pid) => {
                 let s = state.lock().await;
                 Response {
