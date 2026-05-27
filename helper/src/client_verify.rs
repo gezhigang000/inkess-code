@@ -46,9 +46,8 @@ use crate::ipc::IpcStream;
 /// Platform notes:
 ///   - Unix:    `getpeereid(fd)` returns (uid, gid)
 ///   - Windows: `GetNamedPipeClientProcessId(handle)` returns the client
-///              PID; we then `OpenProcess` + `OpenProcessToken` to read
-///              the user SID for logging. Phase 2 will additionally call
-///              `WTGetSignatureInfo` to verify the client binary's
+///              PID, which Phase 1 records for logging only. Future
+///              verification work may inspect the process, token, and
 ///              authenticode signature against our cert thumbprint.
 pub fn verify_client(stream: &IpcStream) -> Result<VerifiedClient> {
     #[cfg(unix)]
