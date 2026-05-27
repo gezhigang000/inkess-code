@@ -279,12 +279,12 @@ pub async fn stop(state: Arc<Mutex<HelperState>>) -> Result<()> {
 /// Validate that a filesystem path:
 ///   1. is absolute
 ///   2. does not contain `..` segments (defense in depth against traversal)
-///   3. is within an allowed prefix — the app's `Application Support` /
-///      `%APPDATA%`, or the bundled Resources path
+///   3. is within an Inkess Code app-managed sing-box runtime path
 ///
 /// We intentionally don't hardcode a specific user's home dir: the helper
 /// runs as root/SYSTEM (no `$HOME` / `%USERPROFILE%`) and the client could
-/// be any user session.
+/// be any user session. This allowlist is intentionally narrow: arbitrary
+/// user, application, and temp directories are not accepted.
 fn validate_path(p: &str) -> Result<()> {
     let path = PathBuf::from(p);
     if !path.is_absolute() {
@@ -304,26 +304,26 @@ fn validate_path(p: &str) -> Result<()> {
 
 #[cfg(unix)]
 fn is_allowed_prefix(p: &str) -> bool {
-    // /Users/<user>/Library/Application Support/inkess-claude-code-pro/...
-    // /Applications/Inkess Claude Code Pro.app/Contents/Resources/...
-    // /tmp/, /private/tmp/, /private/var/folders/ — test + macOS realpath
-    const ALLOWED: &[&str] = &[
-        "/Users/",
-        "/Applications/",
-        "/tmp/",
-        "/private/tmp/",
-        "/private/var/folders/",
+    is_unix_inkess_singbox_runtime(p) || is_unix_test_fixture_path(p)
+}
+
+#[cfg(unix)]
+fn is_unix_inkess_singbox_runtime(p: &str) -> bool {
+    const USERDATA_MARKERS: &[&str] = &[
+        "/Library/Application Support/InkessCode/sing-box/",
+        "/Library/Application Support/inkess-code/sing-box/",
     ];
-    ALLOWED.iter().any(|prefix| p.starts_with(prefix))
+    p.starts_with("/Users/") && USERDATA_MARKERS.iter().any(|marker| p.contains(marker))
+}
+
+#[cfg(unix)]
+fn is_unix_test_fixture_path(p: &str) -> bool {
+    cfg!(test) && p.starts_with("/tmp/inkess-helper-test/")
 }
 
 #[cfg(windows)]
 fn is_allowed_prefix(p: &str) -> bool {
-    // Windows paths the app legitimately writes to or reads from. We accept
-    // any drive letter under the user's AppData / Program Files / Temp.
-    // Comparison is case-insensitive because Windows is.
     let lower = p.to_ascii_lowercase().replace('/', "\\");
-    // Strip the drive letter ("c:") if present so the suffix tests work.
     let after_drive = if lower.len() >= 3
         && lower.as_bytes()[1] == b':'
         && (lower.as_bytes()[2] == b'\\' || lower.as_bytes()[2] == b'/')
@@ -332,14 +332,22 @@ fn is_allowed_prefix(p: &str) -> bool {
     } else {
         lower.as_str()
     };
-    const ALLOWED: &[&str] = &[
-        "\\users\\",            // C:\Users\<user>\AppData\Roaming\inkess-claude-code-pro\...
-        "\\program files\\",    // C:\Program Files\Inkess Claude Code Pro\resources\...
-        "\\program files (x86)\\",
-        "\\programdata\\",
-        "\\windows\\temp\\",    // test only
+
+    is_windows_inkess_singbox_runtime(after_drive) || is_windows_test_fixture_path(after_drive)
+}
+
+#[cfg(windows)]
+fn is_windows_inkess_singbox_runtime(p: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "\\appdata\\roaming\\inkesscode\\sing-box\\",
+        "\\appdata\\roaming\\inkess-code\\sing-box\\",
     ];
-    ALLOWED.iter().any(|prefix| after_drive.starts_with(prefix))
+    p.starts_with("\\users\\") && MARKERS.iter().any(|marker| p.contains(marker))
+}
+
+#[cfg(windows)]
+fn is_windows_test_fixture_path(p: &str) -> bool {
+    cfg!(test) && p.starts_with("\\windows\\temp\\inkess-helper-test\\")
 }
 
 #[cfg(test)]
@@ -347,9 +355,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn valid_paths() {
-        assert!(validate_path("/Users/alice/Library/Application Support/inkess-claude-code-pro/sing-box/sing-box").is_ok());
-        assert!(validate_path("/Applications/Inkess Claude Code Pro.app/Contents/Resources/rule-set/geosite-cn.srs").is_ok());
+    fn accepts_inkess_code_singbox_runtime_paths() {
+        assert!(validate_path(
+            "/Users/alice/Library/Application Support/InkessCode/sing-box/sing-box"
+        )
+        .is_ok());
+        assert!(validate_path(
+            "/Users/alice/Library/Application Support/InkessCode/sing-box/config.json"
+        )
+        .is_ok());
+        assert!(validate_path(
+            "/Users/alice/Library/Application Support/inkess-code/sing-box/sing-box"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_broad_user_application_and_temp_paths() {
+        assert!(validate_path("/Users/alice/Downloads/sing-box").is_err());
+        assert!(validate_path("/Applications/SomeOther.app/Contents/MacOS/sing-box").is_err());
+        assert!(validate_path("/tmp/inkess-evil/sing-box").is_err());
+        assert!(validate_path("/private/tmp/inkess-evil/sing-box").is_err());
+        assert!(validate_path("/private/var/folders/zz/evil/sing-box").is_err());
+    }
+
+    #[test]
+    fn accepts_test_fixture_path_only_in_tests() {
+        assert!(validate_path("/tmp/inkess-helper-test/sing-box").is_ok());
+        assert!(validate_path("/tmp/inkess-helper-test/config.json").is_ok());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 name = "inkess-ccp-helper"
 version = "0.2.1"
 edition = "2021"
-description = "Privileged helper for Inkess Claude Code Pro — manages sing-box lifecycle without repeated password prompts"
+description = "Privileged helper for Inkess Code — manages sing-box lifecycle without repeated password prompts"
 authors = ["Inkess <noreply@starapp.net>"]
 license = "MIT"
 
