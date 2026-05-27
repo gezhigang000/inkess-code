@@ -1,7 +1,7 @@
 //! Client code-signature verification for the helper socket.
 //!
 //! When a process connects to the helper's Unix socket, we want to ensure
-//! it's really the Inkess Claude Code Pro app — not some random local
+//! it's really the Inkess Code app — not some random local
 //! process trying to abuse our root privileges to mess with routing / DNS.
 //!
 //! macOS provides `SecCodeCopyGuestWithAttributes` which takes a `pid=`
@@ -9,7 +9,7 @@
 //! on-disk code. We then check it against a `SecRequirementRef` built
 //! from a designated-requirement string, e.g.:
 //!
-//!   identifier "com.inkess.claude-code-pro"
+//!   identifier "com.inkess.code"
 //!   and anchor apple generic
 //!   and certificate leaf[subject.CN] = "Developer ID Application: grant ge (3X5DVPNRS7)"
 //!   and certificate 1[field.1.2.840.113635.100.6.2.6]
