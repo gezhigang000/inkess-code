@@ -336,7 +336,7 @@ fn validate_runtime_artifact_path(
     if file_name != expected_name {
         return Err(anyhow!("path must end with {}", expected_name));
     }
-    validate_allowed_prefix(p, peer_uid)?;
+    validate_allowed_path(p, peer_uid, expected_name)?;
     Ok(())
 }
 
@@ -361,19 +361,19 @@ fn reject_symlink_components(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_allowed_prefix(p: &str, peer_uid: Option<u32>) -> Result<()> {
-    if !is_allowed_prefix(p, peer_uid)? {
-        return Err(anyhow!("path not under an allowed prefix: {}", p));
+fn validate_allowed_path(p: &str, peer_uid: Option<u32>, expected_name: &str) -> Result<()> {
+    if !is_allowed_artifact_path(p, peer_uid, expected_name)? {
+        return Err(anyhow!("path is not an allowed runtime artifact: {}", p));
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn is_allowed_prefix(p: &str, peer_uid: Option<u32>) -> Result<bool> {
-    if is_unix_test_fixture_path(p) {
+fn is_allowed_artifact_path(p: &str, peer_uid: Option<u32>, expected_name: &str) -> Result<bool> {
+    if is_unix_test_fixture_artifact_path(p, expected_name) {
         return Ok(true);
     }
-    let Some(home) = unix_user_home_for_inkess_singbox_runtime(p) else {
+    let Some(home) = unix_user_home_for_inkess_singbox_artifact(p, expected_name) else {
         return Ok(false);
     };
     if let Some(uid) = peer_uid {
@@ -383,18 +383,20 @@ fn is_allowed_prefix(p: &str, peer_uid: Option<u32>) -> Result<bool> {
 }
 
 #[cfg(unix)]
-fn unix_user_home_for_inkess_singbox_runtime(p: &str) -> Option<PathBuf> {
-    const USERDATA_TAILS: &[&str] = &[
-        "/Library/Application Support/InkessCode/sing-box/",
-        "/Library/Application Support/inkess-code/sing-box/",
+fn unix_user_home_for_inkess_singbox_artifact(p: &str, expected_name: &str) -> Option<PathBuf> {
+    const USERDATA_TAIL_PREFIXES: &[&str] = &[
+        "Library/Application Support/InkessCode/sing-box/",
+        "Library/Application Support/inkess-code/sing-box/",
     ];
     let after_users = p.strip_prefix("/Users/")?;
     let (user, after_user) = after_users.split_once('/')?;
-    if user.is_empty()
-        || !USERDATA_TAILS
-            .iter()
-            .any(|tail| after_user.starts_with(tail.strip_prefix('/').unwrap_or(tail)))
-    {
+    if user.is_empty() {
+        return None;
+    }
+    let matches_exact_tail = USERDATA_TAIL_PREFIXES
+        .iter()
+        .any(|prefix| after_user == format!("{}{}", prefix, expected_name));
+    if !matches_exact_tail {
         return None;
     }
     Some(PathBuf::from(format!("/Users/{}", user)))
@@ -418,12 +420,12 @@ fn validate_unix_home_owner(home: &Path, peer_uid: u32) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn is_unix_test_fixture_path(p: &str) -> bool {
-    cfg!(test) && p.starts_with("/tmp/inkess-helper-test/")
+fn is_unix_test_fixture_artifact_path(p: &str, expected_name: &str) -> bool {
+    cfg!(test) && p == format!("/tmp/inkess-helper-test/{}", expected_name)
 }
 
 #[cfg(windows)]
-fn is_allowed_prefix(p: &str, _peer_uid: Option<u32>) -> Result<bool> {
+fn is_allowed_artifact_path(p: &str, _peer_uid: Option<u32>, expected_name: &str) -> Result<bool> {
     let lower = p.to_ascii_lowercase().replace('/', "\\");
     let after_drive = if lower.len() >= 3
         && lower.as_bytes()[1] == b':'
@@ -434,14 +436,17 @@ fn is_allowed_prefix(p: &str, _peer_uid: Option<u32>) -> Result<bool> {
         lower.as_str()
     };
 
-    Ok(is_windows_inkess_singbox_runtime(after_drive) || is_windows_test_fixture_path(after_drive))
+    Ok(
+        is_windows_inkess_singbox_artifact(after_drive, expected_name)
+            || is_windows_test_fixture_artifact_path(after_drive, expected_name),
+    )
 }
 
 #[cfg(windows)]
-fn is_windows_inkess_singbox_runtime(p: &str) -> bool {
-    const TAILS: &[&str] = &[
-        "\\appdata\\roaming\\inkesscode\\sing-box\\",
-        "\\appdata\\roaming\\inkess-code\\sing-box\\",
+fn is_windows_inkess_singbox_artifact(p: &str, expected_name: &str) -> bool {
+    const TAIL_PREFIXES: &[&str] = &[
+        "appdata\\roaming\\inkesscode\\sing-box\\",
+        "appdata\\roaming\\inkess-code\\sing-box\\",
     ];
     let Some(after_users) = p.strip_prefix("\\users\\") else {
         return false;
@@ -450,14 +455,18 @@ fn is_windows_inkess_singbox_runtime(p: &str) -> bool {
         return false;
     };
     !user.is_empty()
-        && TAILS
+        && TAIL_PREFIXES
             .iter()
-            .any(|tail| after_user.starts_with(tail.strip_prefix('\\').unwrap_or(tail)))
+            .any(|prefix| after_user == format!("{}{}", prefix, expected_name.to_ascii_lowercase()))
 }
 
 #[cfg(windows)]
-fn is_windows_test_fixture_path(p: &str) -> bool {
-    cfg!(test) && p.starts_with("\\windows\\temp\\inkess-helper-test\\")
+fn is_windows_test_fixture_artifact_path(p: &str, expected_name: &str) -> bool {
+    cfg!(test)
+        && p == format!(
+            "\\windows\\temp\\inkess-helper-test\\{}",
+            expected_name.to_ascii_lowercase()
+        )
 }
 
 #[cfg(test)]
@@ -512,6 +521,22 @@ mod tests {
             None
         )
         .is_err());
+    }
+
+    #[test]
+    fn validate_path_rejects_nested_expected_artifact_names() {
+        assert!(validate_binary_path(
+            "/Users/alice/Library/Application Support/InkessCode/sing-box/nested/sing-box",
+            None
+        )
+        .is_err());
+        assert!(validate_config_path(
+            "/Users/alice/Library/Application Support/InkessCode/sing-box/nested/config.json",
+            None
+        )
+        .is_err());
+        assert!(validate_binary_path("/tmp/inkess-helper-test/nested/sing-box", None).is_err());
+        assert!(validate_config_path("/tmp/inkess-helper-test/nested/config.json", None).is_err());
     }
 
     #[test]
