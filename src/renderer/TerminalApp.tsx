@@ -19,6 +19,7 @@ import { ChatErrorBoundary } from './views/chat/ChatErrorBoundary'
 import { useChatStream } from './views/chat/hooks/useChatStream'
 import { useChatList } from './views/chat/hooks/useChatList'
 import { useI18n } from './i18n'
+import { cleanupForAccountSwitch, cleanupForLoginRedirect } from './auth/session-cleanup'
 
 const DEFAULT_CWD = window.api?.homedir || '/'
 const isMac = window.api?.platform === 'darwin'
@@ -477,22 +478,12 @@ export function TerminalApp() {
   }, [])
 
   const forceExpiredLogout = useCallback(() => {
-    // Kill all active PTY sessions
-    const store = useTerminalStore.getState()
-    store.tabs.forEach(tab => {
-      if (tab.ptyId && !tab.isExited) {
-        window.api.pty.kill(tab.ptyId)
-      }
-    })
     // Clear polling
     if (statusPollRef.current) { clearInterval(statusPollRef.current); statusPollRef.current = null }
     if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null }
-    // Stop TUN and close browser windows
-    window.api.tun.stop()
-    window.api.browser.closeAll()
-    // Clear Claude credentials and logout
-    window.api.claude.clearCredentials()
-    window.api.subscription.logout()
+    // Preserve PTY sessions on forced auth redirects so running tasks can
+    // continue and reattach after the user logs back in.
+    void cleanupForLoginRedirect(window.api)
     setTunOk(false)
     setSubscriptionLoggedIn(false)
     setSubscriptionExpiry(null)
@@ -518,11 +509,7 @@ export function TerminalApp() {
 
   /** Switch account — logout current, show login page */
   const handleSwitchAccount = useCallback(async () => {
-    await window.api.tun.stop()
-    await window.api.pty.killAll()
-    window.api.browser.closeAll()
-    window.api.claude.clearCredentials()
-    window.api.subscription.logout()
+    await cleanupForAccountSwitch(window.api)
     if (statusPollRef.current) { clearInterval(statusPollRef.current); statusPollRef.current = null }
     if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null }
     setTunOk(false)
@@ -582,7 +569,6 @@ export function TerminalApp() {
           console.log(`[StatusPoll] proxyUrl changed, triggering TUN reconnect`)
           setTunOk(false) // Shows TunGate overlay which will reconnect
           await window.api.tun.stop()
-          await window.api.pty.killAll()
         }
       }
       if (status.exitIp) {
