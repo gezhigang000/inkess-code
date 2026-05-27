@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, rmSync } from 'fs'
-import { join, resolve, sep } from 'path'
+import { join, resolve } from 'path'
 import type { ChatMeta, ChatsIndex } from './chat-types'
 
 /**
@@ -81,8 +81,15 @@ export class ChatStore {
     const i = this.chats.findIndex((c) => c.id === chatId)
     if (i < 0) throw new Error(`chat ${chatId} not found`)
 
-    // Never allow mutation of id / createdAt / cwd / cliVersion
-    const { id: _id, createdAt: _cr, cwd: _cwd, cliVersion: _cv, ...safe } = patch
+    // Never allow mutation of id / createdAt / cwd / mountedDirs / cliVersion
+    const {
+      id: _id,
+      createdAt: _cr,
+      cwd: _cwd,
+      mountedDirs: _mountedDirs,
+      cliVersion: _cv,
+      ...safe
+    } = patch
     const prev = this.chats[i]
     this.chats[i] = { ...prev, ...safe, updatedAt: Date.now() }
     try {
@@ -100,7 +107,7 @@ export class ChatStore {
     this.chats.splice(i, 1)
     await this.writeIndex()
 
-    if (opts.removeFiles && this.isManagedWorkspacePath(victim.cwd)) {
+    if (opts.removeFiles && this.isManagedWorkspacePath(victim.id, victim.cwd)) {
       try {
         rmSync(victim.cwd, { recursive: true, force: true })
       } catch {
@@ -109,10 +116,10 @@ export class ChatStore {
     }
   }
 
-  private isManagedWorkspacePath(path: string): boolean {
-    const root = resolve(this.workspaceDir)
+  private isManagedWorkspacePath(chatId: string, path: string): boolean {
+    const root = resolve(join(this.workspaceDir, chatId))
     const target = resolve(path)
-    return target.startsWith(root + sep)
+    return target === root
   }
 
   private readIndex(): ChatMeta[] {
@@ -132,7 +139,7 @@ export class ChatStore {
     if (!isValidIndex(parsed)) {
       return this.backupAndReset()
     }
-    return parsed.chats
+    return parsed.chats.map(normalizeChatMeta)
   }
 
   private backupAndReset(): ChatMeta[] {
@@ -157,4 +164,11 @@ function isValidIndex(x: unknown): x is ChatsIndex {
   if (!x || typeof x !== 'object') return false
   const v = x as Record<string, unknown>
   return v.version === 1 && Array.isArray(v.chats)
+}
+
+function normalizeChatMeta(chat: ChatMeta): ChatMeta {
+  return {
+    ...chat,
+    mountedDirs: Array.isArray(chat.mountedDirs) ? chat.mountedDirs : [],
+  }
 }

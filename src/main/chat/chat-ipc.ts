@@ -40,9 +40,11 @@ export function registerChatIPC(deps: ChatIpcDeps): void {
   })
 
   ipcMain.handle('chat:create', async (_event, args?: unknown) => {
-    const a = args as { cwd?: string; engine?: string } | undefined
+    const a = args && typeof args === 'object'
+      ? args as { cwd?: unknown; engine?: string }
+      : undefined
     let cwd: string | undefined
-    if (typeof a?.cwd === 'string' && a.cwd.length > 0) {
+    if (a && Object.prototype.hasOwnProperty.call(a, 'cwd')) {
       validateDirPath(a.cwd)
       cwd = a.cwd
     }

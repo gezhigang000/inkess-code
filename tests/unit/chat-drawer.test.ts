@@ -61,7 +61,10 @@ describe('ChatStore.create() with custom cwd', () => {
     const base = (store as any).baseDir as string
     const expectedWorkspace = join(base, 'ai-workspace', meta.id)
 
-    await store.update(meta.id, { cwd: '/tmp/evil' } as any)
+    await store.update(meta.id, {
+      cwd: '/tmp/evil',
+      mountedDirs: ['/tmp/also-evil'],
+    } as any)
 
     const after = store.get(meta.id)!
     expect(after.cwd).toBe(expectedWorkspace)
