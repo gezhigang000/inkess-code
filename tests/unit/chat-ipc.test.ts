@@ -64,6 +64,14 @@ describe('chat:create IPC', () => {
     expect(create).toHaveBeenCalledWith({ cwd: undefined, engine: 'codex' })
   })
 
+  it('treats explicit undefined cwd as no mount and preserves codex engine', async () => {
+    const { create, handler } = registerWithCreate()
+
+    await handler({}, { cwd: undefined, engine: 'codex' })
+
+    expect(create).toHaveBeenCalledWith({ cwd: undefined, engine: 'codex' })
+  })
+
   it('validates and passes a present valid cwd', async () => {
     const { create, handler } = registerWithCreate()
     const cwd = homedir()

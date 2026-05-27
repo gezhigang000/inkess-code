@@ -44,7 +44,7 @@ export function registerChatIPC(deps: ChatIpcDeps): void {
       ? args as { cwd?: unknown; engine?: string }
       : undefined
     let cwd: string | undefined
-    if (a && Object.prototype.hasOwnProperty.call(a, 'cwd')) {
+    if (a && Object.prototype.hasOwnProperty.call(a, 'cwd') && a.cwd !== undefined) {
       validateDirPath(a.cwd)
       cwd = a.cwd
     }
