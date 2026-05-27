@@ -33,6 +33,10 @@ const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// defense-in-depth boundary, not full code-signature authentication:
 /// arbitrary user, application, and temp paths are rejected so the helper
 /// cannot be asked to run an unrelated binary or load an unrelated config.
+/// Phase 1 peer-uid binding prevents cross-user runtime path abuse, but
+/// same-uid local processes can still tamper with these user-writable exact
+/// artifacts until client authentication and binary/config integrity checks
+/// are added.
 pub async fn start(
     state: Arc<Mutex<HelperState>>,
     binary_path: &str,
@@ -426,23 +430,27 @@ fn is_unix_test_fixture_artifact_path(p: &str, expected_name: &str) -> bool {
 
 #[cfg(windows)]
 fn is_allowed_artifact_path(p: &str, _peer_uid: Option<u32>, expected_name: &str) -> Result<bool> {
-    let lower = p.to_ascii_lowercase().replace('/', "\\");
-    let after_drive = if lower.len() >= 3
-        && lower.as_bytes()[1] == b':'
-        && (lower.as_bytes()[2] == b'\\' || lower.as_bytes()[2] == b'/')
-    {
-        &lower[2..]
-    } else {
-        lower.as_str()
-    };
-
-    Ok(
-        is_windows_inkess_singbox_artifact(after_drive, expected_name)
-            || is_windows_test_fixture_artifact_path(after_drive, expected_name),
-    )
+    Ok(is_windows_allowed_artifact_path(p, expected_name))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
+fn is_windows_allowed_artifact_path(p: &str, expected_name: &str) -> bool {
+    let lower = p.to_ascii_lowercase().replace('/', "\\");
+    if lower.starts_with("\\\\") {
+        return false;
+    }
+    let after_drive =
+        if lower.len() >= 3 && lower.as_bytes()[1] == b':' && lower.as_bytes()[2] == b'\\' {
+            &lower[2..]
+        } else {
+            lower.as_str()
+        };
+
+    is_windows_inkess_singbox_artifact(after_drive, expected_name)
+        || is_windows_test_fixture_artifact_path(after_drive, expected_name)
+}
+
+#[cfg(any(windows, test))]
 fn is_windows_inkess_singbox_artifact(p: &str, expected_name: &str) -> bool {
     const TAIL_PREFIXES: &[&str] = &[
         "appdata\\roaming\\inkesscode\\sing-box\\",
@@ -460,7 +468,7 @@ fn is_windows_inkess_singbox_artifact(p: &str, expected_name: &str) -> bool {
             .any(|prefix| after_user == format!("{}{}", prefix, expected_name.to_ascii_lowercase()))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn is_windows_test_fixture_artifact_path(p: &str, expected_name: &str) -> bool {
     cfg!(test)
         && p == format!(
@@ -473,6 +481,7 @@ fn is_windows_test_fixture_artifact_path(p: &str, expected_name: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn validate_path_accepts_inkess_code_singbox_runtime_paths() {
         assert!(validate_binary_path(
@@ -492,6 +501,7 @@ mod tests {
         .is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn validate_path_rejects_broad_user_application_and_temp_paths() {
         assert!(validate_binary_path("/Users/alice/Downloads/sing-box", None).is_err());
@@ -509,6 +519,7 @@ mod tests {
         assert!(validate_binary_path("/private/var/folders/zz/evil/sing-box", None).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn validate_path_rejects_arbitrary_files_under_runtime_dir() {
         assert!(validate_binary_path(
@@ -523,6 +534,7 @@ mod tests {
         .is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn validate_path_rejects_nested_expected_artifact_names() {
         assert!(validate_binary_path(
@@ -539,12 +551,14 @@ mod tests {
         assert!(validate_config_path("/tmp/inkess-helper-test/nested/config.json", None).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn validate_path_accepts_test_fixture_path_only_in_tests() {
         assert!(validate_binary_path("/tmp/inkess-helper-test/sing-box", None).is_ok());
         assert!(validate_config_path("/tmp/inkess-helper-test/config.json", None).is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn validate_path_reject_traversal() {
         assert!(validate_binary_path("/Users/alice/../root/.ssh/id_rsa", None).is_err());
@@ -555,10 +569,43 @@ mod tests {
         assert!(validate_config_path("sing-box/config.json", None).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn validate_path_reject_system_paths() {
         assert!(validate_config_path("/etc/passwd", None).is_err());
         assert!(validate_binary_path("/bin/sh", None).is_err());
+    }
+
+    #[test]
+    fn validate_path_windows_matcher_accepts_exact_runtime_artifacts() {
+        assert!(is_windows_allowed_artifact_path(
+            r"C:\Users\Alice\AppData\Roaming\InkessCode\sing-box\sing-box.exe",
+            "sing-box.exe"
+        ));
+        assert!(is_windows_allowed_artifact_path(
+            r"C:\Users\Alice\AppData\Roaming\InkessCode\sing-box\config.json",
+            "config.json"
+        ));
+        assert!(is_windows_allowed_artifact_path(
+            r"C:/Users/Alice/AppData/Roaming/InkessCode/sing-box/sing-box.exe",
+            "sing-box.exe"
+        ));
+    }
+
+    #[test]
+    fn validate_path_windows_matcher_rejects_nested_and_unc_paths() {
+        assert!(!is_windows_allowed_artifact_path(
+            r"C:\Users\Alice\AppData\Roaming\InkessCode\sing-box\nested\sing-box.exe",
+            "sing-box.exe"
+        ));
+        assert!(!is_windows_allowed_artifact_path(
+            r"\\server\share\Users\Alice\AppData\Roaming\InkessCode\sing-box\sing-box.exe",
+            "sing-box.exe"
+        ));
+        assert!(!is_windows_allowed_artifact_path(
+            r"\\?\C:\Users\Alice\AppData\Roaming\InkessCode\sing-box\sing-box.exe",
+            "sing-box.exe"
+        ));
     }
 
     #[cfg(unix)]
