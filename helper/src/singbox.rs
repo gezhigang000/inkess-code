@@ -28,10 +28,9 @@ const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// child in `HelperState`. Kills any previously-running sing-box first.
 ///
 /// Validates that `binary_path` and `config_path` exist and are under the
-/// user's `~/Library/Application Support/inkess-claude-code-pro/` directory
-/// (the only location the app can legitimately write to) — this prevents a
-/// compromised (but still code-signed) client from asking us to run an
-/// arbitrary binary or load an arbitrary config.
+/// Inkess Code app-managed sing-box runtime directory. Arbitrary user,
+/// application, and temp paths are rejected so the helper cannot be asked
+/// to run an unrelated binary or load an unrelated config.
 pub async fn start(
     state: Arc<Mutex<HelperState>>,
     binary_path: &str,
@@ -309,11 +308,20 @@ fn is_allowed_prefix(p: &str) -> bool {
 
 #[cfg(unix)]
 fn is_unix_inkess_singbox_runtime(p: &str) -> bool {
-    const USERDATA_MARKERS: &[&str] = &[
+    const USERDATA_TAILS: &[&str] = &[
         "/Library/Application Support/InkessCode/sing-box/",
         "/Library/Application Support/inkess-code/sing-box/",
     ];
-    p.starts_with("/Users/") && USERDATA_MARKERS.iter().any(|marker| p.contains(marker))
+    let Some(after_users) = p.strip_prefix("/Users/") else {
+        return false;
+    };
+    let Some((user, after_user)) = after_users.split_once('/') else {
+        return false;
+    };
+    !user.is_empty()
+        && USERDATA_TAILS
+            .iter()
+            .any(|tail| after_user.starts_with(tail.strip_prefix('/').unwrap_or(tail)))
 }
 
 #[cfg(unix)]
@@ -338,11 +346,20 @@ fn is_allowed_prefix(p: &str) -> bool {
 
 #[cfg(windows)]
 fn is_windows_inkess_singbox_runtime(p: &str) -> bool {
-    const MARKERS: &[&str] = &[
+    const TAILS: &[&str] = &[
         "\\appdata\\roaming\\inkesscode\\sing-box\\",
         "\\appdata\\roaming\\inkess-code\\sing-box\\",
     ];
-    p.starts_with("\\users\\") && MARKERS.iter().any(|marker| p.contains(marker))
+    let Some(after_users) = p.strip_prefix("\\users\\") else {
+        return false;
+    };
+    let Some((user, after_user)) = after_users.split_once('\\') else {
+        return false;
+    };
+    !user.is_empty()
+        && TAILS
+            .iter()
+            .any(|tail| after_user.starts_with(tail.strip_prefix('\\').unwrap_or(tail)))
 }
 
 #[cfg(windows)]
@@ -355,7 +372,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_inkess_code_singbox_runtime_paths() {
+    fn validate_path_accepts_inkess_code_singbox_runtime_paths() {
         assert!(validate_path(
             "/Users/alice/Library/Application Support/InkessCode/sing-box/sing-box"
         )
@@ -371,8 +388,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_broad_user_application_and_temp_paths() {
+    fn validate_path_rejects_broad_user_application_and_temp_paths() {
         assert!(validate_path("/Users/alice/Downloads/sing-box").is_err());
+        assert!(validate_path(
+            "/Users/alice/Downloads/Library/Application Support/InkessCode/sing-box/sing-box"
+        )
+        .is_err());
         assert!(validate_path("/Applications/SomeOther.app/Contents/MacOS/sing-box").is_err());
         assert!(validate_path("/tmp/inkess-evil/sing-box").is_err());
         assert!(validate_path("/private/tmp/inkess-evil/sing-box").is_err());
@@ -380,23 +401,23 @@ mod tests {
     }
 
     #[test]
-    fn accepts_test_fixture_path_only_in_tests() {
+    fn validate_path_accepts_test_fixture_path_only_in_tests() {
         assert!(validate_path("/tmp/inkess-helper-test/sing-box").is_ok());
         assert!(validate_path("/tmp/inkess-helper-test/config.json").is_ok());
     }
 
     #[test]
-    fn reject_traversal() {
+    fn validate_path_reject_traversal() {
         assert!(validate_path("/Users/alice/../root/.ssh/id_rsa").is_err());
     }
 
     #[test]
-    fn reject_relative() {
+    fn validate_path_reject_relative() {
         assert!(validate_path("sing-box/config.json").is_err());
     }
 
     #[test]
-    fn reject_system_paths() {
+    fn validate_path_reject_system_paths() {
         assert!(validate_path("/etc/passwd").is_err());
         assert!(validate_path("/bin/sh").is_err());
     }
