@@ -38,6 +38,15 @@ app.commandLine.appendSwitch('disable-ipv6')
 // Per-window locale is further refined via JS injection based on actual region
 app.commandLine.appendSwitch('lang', 'en-US')
 
+// TEMP DIAGNOSTIC: macOS 26 (Tahoe) ARM64 triggers a deterministic V8 W^X /
+// JIT EXC_BREAKPOINT (SIGTRAP) crash in some Electron apps (see
+// electron/electron#49522). Forced ON for now to confirm whether the crash is
+// the JIT path — set INKESS_JITLESS=0 to opt back out. JS runs slower here.
+if (process.env.INKESS_JITLESS !== '0') {
+  app.commandLine.appendSwitch('js-flags', '--jitless')
+  log.info('[startup] V8 JIT disabled (--jitless) [diagnostic default ON]')
+}
+
 process.on('uncaughtException', (err) => log.error('Uncaught:', err))
 process.on('unhandledRejection', (reason) => log.error('Unhandled:', reason))
 
@@ -1518,9 +1527,14 @@ app.whenReady().then(async () => {
     safeSend('appUpdate:status', status)
   })
 
-  // Delay update check until TUN is likely ready (60s instead of 5s)
-  // TUN startup takes ~20-30s (sudo prompt + sing-box start + connectivity test)
-  setTimeout(() => checkForAppUpdate(), 60000)
+  // Delay update check until TUN is likely ready (60s instead of 5s).
+  // On macOS, skip automatic main-process network checks by default because
+  // Electron/Node TLS callbacks have reproduced native crashes after TUN starts.
+  if (process.platform === 'darwin' && process.env.INKESS_ENABLE_MAC_BACKGROUND_NET !== '1') {
+    log.info('[startup] automatic update check skipped on macOS')
+  } else {
+    setTimeout(() => checkForAppUpdate(), 60000)
+  }
   statsCollector.logEvent('app:launch', app.getVersion())
 
   app.on('activate', () => {

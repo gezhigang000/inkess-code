@@ -19,26 +19,21 @@ import { HelperInstaller } from './helper-installer'
 const execFileAsync = promisify(execFile)
 
 // ---------------------------------------------------------------------------
-// Keep-alive HTTP agent for connectivity probes.
-// Reuses TCP+TLS connections so measured latency reflects real-world usage
-// (warm connections) rather than cold-start handshake overhead (~200ms vs ~1800ms).
+// Connectivity probe transport.
+// macOS builds use curl by default so TLS/DNS probe crashes stay isolated in a
+// short-lived child process instead of taking down Electron's main process.
+// Set INKESS_PROBE_TRANSPORT=node to force the old in-process probe path.
 // ---------------------------------------------------------------------------
-let probeAgent = createProbeAgent()
+type ProbeTransport = 'curl' | 'node'
 
-function createProbeAgent(): https.Agent {
-  return new https.Agent({
-    keepAlive: true,
-    keepAliveMsecs: 60_000, // keep idle connections for 60s (probe interval is ~60s)
-    maxSockets: 5,
-  })
+function getProbeTransport(): ProbeTransport {
+  const configured = process.env.INKESS_PROBE_TRANSPORT?.toLowerCase()
+  if (configured === 'curl' || configured === 'node') return configured
+  return os.platform() === 'darwin' ? 'curl' : 'node'
 }
 
-/** Destroy all probe connections and create a fresh agent.
- *  Call when TUN stops/restarts so stale sockets don't poison the next cycle. */
 function resetProbeAgent(): void {
-  probeAgent.destroy()
-  probeAgent = createProbeAgent()
-  log.info('[probe] connection pool reset')
+  log.info(`[probe] transport reset (${getProbeTransport()}, stateless)`)
 }
 
 // DNS server to set via scutil — any routable IP works because sing-box
@@ -1130,6 +1125,16 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
       return { success: false, error }
     }
 
+    if (os.platform() === 'darwin' && process.env.INKESS_ENABLE_MAC_PROBES !== '1') {
+      this._internetReachable = true
+      this._latencyMs = null
+      if (exitIp) this._lastActualIp = exitIp
+      this._lastSeenHealthyAt = Date.now()
+      log.info(`[testConnectivity] macOS network probe skipped — TUN running via helper (expected exit ${exitIp || 'any'})`)
+      this.emitStatus(exitIp || null, null)
+      return { success: true, actualIp: exitIp || undefined }
+    }
+
     // Multi-target race: probe several endpoints in parallel; any 200 means
     // "network is healthy". This makes the check robust to a single target
     // (notably cloudflare) being throttled or blocked — which has historically
@@ -1140,18 +1145,24 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
     // my exit IP" — we wait for it to land if any target succeeds, but only
     // briefly, so a slow/blocked cloudflare doesn't stretch the whole probe.
     const PROBE_TIMEOUT_MS = 8000
-    const probes: Array<Promise<{ url: string; status: number; ms: number; trace?: string }>> = [
-      probeOne('https://www.cloudflare.com/cdn-cgi/trace', PROBE_TIMEOUT_MS, true),
-      probeOne('https://api.anthropic.com/', PROBE_TIMEOUT_MS, false),
-      probeOne('https://claude.com/', PROBE_TIMEOUT_MS, false),
-    ]
+    // macOS 26 + Electron has reproduced native main-process crashes while
+    // several Node async probe completions land at once. Keep the macOS probe
+    // path single-flight; sing-box outbound activity remains the fallback if
+    // this endpoint is slow or blocked.
+    const probes: Array<Promise<ProbeResult>> = os.platform() === 'darwin'
+      ? [probeOne('https://www.cloudflare.com/cdn-cgi/trace', PROBE_TIMEOUT_MS, true)]
+      : [
+          probeOne('https://www.cloudflare.com/cdn-cgi/trace', PROBE_TIMEOUT_MS, true),
+          probeOne('https://api.anthropic.com/', PROBE_TIMEOUT_MS, false),
+          probeOne('https://claude.com/', PROBE_TIMEOUT_MS, false),
+        ]
     log.info(`[testConnectivity] race ${probes.length} targets (timeout ${PROBE_TIMEOUT_MS}ms, expected exit ${exitIp || 'any'})...`)
 
     const settled = await Promise.allSettled(probes)
     const winners = settled
       .map((s, i) => ({ s, i }))
       .filter(({ s }) => s.status === 'fulfilled' && (s as PromiseFulfilledResult<{ status: number }>).value.status >= 200 && (s as PromiseFulfilledResult<{ status: number }>).value.status < 400)
-      .map(({ s, i }) => ({ ...((s as PromiseFulfilledResult<{ url: string; status: number; ms: number; trace?: string }>).value), idx: i }))
+      .map(({ s, i }) => ({ ...((s as PromiseFulfilledResult<ProbeResult>).value), idx: i }))
 
     if (winners.length === 0) {
       // Everyone failed. Before declaring failure, check whether sing-box
@@ -1273,6 +1284,14 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
    */
   async runDiagnostics(): Promise<Record<string, unknown>> {
     const results: Record<string, unknown> = { timestamp: new Date().toISOString(), tunStatus: this._status }
+    const addRecentLog = () => {
+      try {
+        const logPath = join(this.singboxDir, 'sing-box.log')
+        const content = readFileSync(logPath, 'utf-8')
+        const lines = content.trim().split('\n')
+        results.recentLog = lines.slice(-20)
+      } catch { results.recentLog = [] }
+    }
 
     // 1. DNS resolution speed (local DNS, 114.114.114.114)
     // Tests actual DNS by resolving a known CN domain. The previous version
@@ -1287,6 +1306,13 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
       ])
       results.localDns = { ms: Date.now() - start, ok: addresses.length > 0, resolved: addresses[0] }
     } catch (e) { results.localDns = { ms: -1, ok: false, error: (e as Error).message } }
+
+    if (os.platform() === 'darwin' && process.env.INKESS_ENABLE_MAC_PROBES !== '1') {
+      results.networkDiagnostics = 'skipped on macOS to avoid Electron main-process network probe crashes'
+      addRecentLog()
+      log.info(`[diagnostics] results: ${JSON.stringify(results, null, 2)}`)
+      return results
+    }
 
     // 2. Direct connection to domestic site (should NOT go through proxy)
     try {
@@ -1319,12 +1345,7 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
     } catch (e) { results.proxyGoogle = { ms: -1, error: (e as Error).message } }
 
     // 6. Read recent sing-box log (last 20 lines)
-    try {
-      const logPath = join(this.singboxDir, 'sing-box.log')
-      const content = readFileSync(logPath, 'utf-8')
-      const lines = content.trim().split('\n')
-      results.recentLog = lines.slice(-20)
-    } catch { results.recentLog = [] }
+    addRecentLog()
 
     log.info(`[diagnostics] results: ${JSON.stringify(results, null, 2)}`)
     return results
@@ -1774,33 +1795,97 @@ dscacheutil -flushcache 2>/dev/null; killall -HUP mDNSResponder 2>/dev/null`
 // ---------------------------------------------------------------------------
 
 /**
- * Single connectivity probe. Uses the shared keep-alive agent so that
- * subsequent probes reuse the TCP+TLS connection — measured latency then
- * reflects real-world usage (~200ms) instead of cold-start handshake
- * overhead (~1800ms).
+ * Single connectivity probe. macOS defaults to a short-lived curl child
+ * process to keep TLS/DNS failures isolated from Electron's main process.
+ * Other platforms keep an in-process HTTPS fallback, but without keep-alive.
  *
  * `wantBody=true` reads the response text (used for cloudflare trace);
- * otherwise we drain & discard the body so the connection can be reused.
+ * otherwise we discard the body after receiving the status.
  *
  * Redirects are NOT followed — a 301/302 still proves the network is
  * up, and we measure latency to first response, not the full chain.
  */
+type ProbeResult = { url: string; status: number; ms: number; trace?: string }
+
 async function probeOne(
   url: string,
   timeoutMs: number,
   wantBody: boolean
-): Promise<{ url: string; status: number; ms: number; trace?: string }> {
+): Promise<ProbeResult> {
+  if (getProbeTransport() === 'curl') {
+    return probeOneWithCurl(url, timeoutMs, wantBody)
+  }
+  return probeOneWithNodeHttps(url, timeoutMs, wantBody)
+}
+
+async function probeOneWithCurl(
+  url: string,
+  timeoutMs: number,
+  wantBody: boolean
+): Promise<ProbeResult> {
+  const start = Date.now()
+  const parsed = new URL(url)
+  const marker = '\n__INKESS_STATUS__:'
+  const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000))
+  const args = [
+    '--silent',
+    '--show-error',
+    '--http1.1',
+    '--max-time', String(timeoutSeconds),
+    '--connect-timeout', String(Math.min(5, timeoutSeconds)),
+    '--output', wantBody ? '-' : '/dev/null',
+    '--write-out', `${marker}%{http_code}`,
+  ]
+  if (!wantBody) args.push('--head')
+  args.push(url)
+
+  const { stdout } = await execFileAsync('curl', args, {
+    timeout: timeoutMs + 1500,
+    maxBuffer: wantBody ? 128 * 1024 : 16 * 1024,
+    encoding: 'utf8',
+  })
+  const output = String(stdout)
+  const markerIndex = output.lastIndexOf(marker)
+  if (markerIndex < 0) {
+    throw new Error(`probe ${parsed.hostname} returned malformed curl output`)
+  }
+  const status = Number(output.slice(markerIndex + marker.length).trim())
+  if (!Number.isFinite(status) || status <= 0) {
+    throw new Error(`probe ${parsed.hostname} returned invalid HTTP status`)
+  }
+
+  const ms = Date.now() - start
+  const trace = wantBody ? output.slice(0, markerIndex) : undefined
+  log.info(`[probe:curl] ${parsed.hostname} → ${status} ${ms}ms`)
+  return { url, status, ms, trace }
+}
+
+async function probeOneWithNodeHttps(
+  url: string,
+  timeoutMs: number,
+  wantBody: boolean
+): Promise<ProbeResult> {
   const start = Date.now()
   const parsed = new URL(url)
 
   return new Promise((resolve, reject) => {
-    const req = https.request(
+    let req: https.ClientRequest | null = null
+    const hardTimer = setTimeout(() => {
+      req?.destroy(new Error(`probe ${parsed.hostname} timed out (${timeoutMs}ms)`))
+    }, timeoutMs)
+
+    const finish = <T>(fn: () => T): T => {
+      clearTimeout(hardTimer)
+      return fn()
+    }
+
+    req = https.request(
       {
         hostname: parsed.hostname,
         port: parsed.port ? Number(parsed.port) : 443,
         path: parsed.pathname + parsed.search,
         method: wantBody ? 'GET' : 'HEAD',
-        agent: probeAgent,
+        agent: false,
         timeout: timeoutMs,
       },
       (res) => {
@@ -1812,17 +1897,17 @@ async function probeOne(
           res.on('data', (chunk) => { body += chunk })
           res.on('end', () => {
             log.info(`[probe] ${parsed.hostname} → ${res.statusCode} ${ms}ms (reused=${reused})`)
-            resolve({ url, status: res.statusCode!, ms, trace: body })
+            finish(() => resolve({ url, status: res.statusCode!, ms, trace: body }))
           })
-          res.on('error', (err) => reject(err))
+          res.on('error', (err) => finish(() => reject(err)))
         } else {
-          // Drain body so the keep-alive connection can be reused
+          // Drain body so the request closes cleanly.
           res.resume()
           res.on('end', () => {
             log.info(`[probe] ${parsed.hostname} → ${res.statusCode} ${ms}ms (reused=${reused})`)
-            resolve({ url, status: res.statusCode!, ms })
+            finish(() => resolve({ url, status: res.statusCode!, ms }))
           })
-          res.on('error', (err) => reject(err))
+          res.on('error', (err) => finish(() => reject(err)))
         }
       },
     )
@@ -1830,7 +1915,7 @@ async function probeOne(
     req.on('timeout', () => {
       req.destroy(new Error(`probe ${parsed.hostname} timed out (${timeoutMs}ms)`))
     })
-    req.on('error', (err) => reject(err))
+    req.on('error', (err) => finish(() => reject(err)))
     req.end()
   })
 }

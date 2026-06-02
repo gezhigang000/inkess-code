@@ -1102,10 +1102,6 @@ export function TerminalApp() {
               window.api.browser.open('https://browserleaks.com/ip').catch(() => {})
               window.api.browserSync.startPeriodicUpload().catch(() => {})
             }
-            // Run network diagnostics after TUN is ready
-            window.api.tun.diagnostics().then(r => {
-              console.log('[App] Network diagnostics:', JSON.stringify(r, null, 2))
-            }).catch(() => {})
           }}
           onRefreshConfig={handleRefreshConfig}
           onSwitchAccount={handleSwitchAccount}

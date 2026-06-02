@@ -1,21 +1,45 @@
-import { session as electronSession, BrowserWindow } from 'electron'
+import { app, session as electronSession, BrowserWindow } from 'electron'
 import { createHash } from 'crypto'
 import log from '../logger'
 import { buildSubscriptionApiUrl } from './api-url'
+import { mainHttpRequest } from '../utils/main-http'
 
 const SYNC_INTERVAL = 10 * 60 * 1000 // 10 minutes
 const UPLOAD_TIMEOUT = 15000
 const LOCALSTORAGE_TIMEOUT = 30000 // 30s — must exceed Cloudflare JS challenge time
 const CLAUDE_ORIGIN = 'https://claude.ai'
+const BROWSER_COOKIE_ALLOWED_BASE_DOMAINS = [
+  'claude.ai',
+  'claude.com',
+  'anthropic.com',
+  'openai.com',
+  'chatgpt.com',
+]
+
+function normalizeCookieDomain(domain?: string): string {
+  return (domain || '').trim().toLowerCase().replace(/^\.+/, '')
+}
+
+function isAllowedBrowserCookieDomain(domain?: string): boolean {
+  const normalized = normalizeCookieDomain(domain)
+  return BROWSER_COOKIE_ALLOWED_BASE_DOMAINS.some(base =>
+    normalized === base || normalized.endsWith(`.${base}`)
+  )
+}
+
+export function filterBrowserSyncCookies<T extends { domain?: string }>(cookies: T[]): T[] {
+  return cookies.filter(cookie => isAllowedBrowserCookieDomain(cookie.domain))
+}
 
 /**
  * v2 sync payload — carries BOTH the claude-dedicated session and the
- * general "browser" session (used for proton.me, cloudflare dash, and
- * anything else the user manually opens). Each session partition in the
- * Electron app has its own cookie jar, so we store + restore them
- * separately. localStorage is only synced for claude.ai (single origin),
- * because cross-site localStorage sync would require loading every origin
- * in a hidden window — infeasible and privacy-hostile.
+ * general "browser" session. The browser session is intentionally narrowed
+ * to Claude/OpenAI product domains during import/upload; arbitrary sites the
+ * user manually opens are not restored because the full generic cookie pool
+ * has caused reproducible native Electron crashes when opening browser tabs.
+ * localStorage is only synced for claude.ai (single origin), because
+ * cross-site localStorage sync would require loading every origin in a hidden
+ * window — infeasible and privacy-hostile.
  */
 interface SyncDataV2 {
   version: 2
@@ -40,6 +64,12 @@ export class BrowserSync {
   private pendingLocalStorage: Record<string, string> | null = null
   private _uploadPromise: Promise<void> | null = null
 
+  private async ensureAppReady(): Promise<void> {
+    if (!app.isReady()) {
+      await app.whenReady()
+    }
+  }
+
   /**
    * Phase 1: Download remote data, import cookies immediately.
    * Stores localStorage in memory for Phase 2 (after TUN ready + claude.ai
@@ -53,9 +83,11 @@ export class BrowserSync {
     log.info(`[BrowserSync] downloadAndImportCookies start for ${username}`)
 
     try {
-      const res = await fetch(buildSubscriptionApiUrl('/api/subscription/browser-data'), {
+      await this.ensureAppReady()
+
+      const res = await mainHttpRequest(buildSubscriptionApiUrl('/api/subscription/browser-data'), {
         headers: { Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(UPLOAD_TIMEOUT),
+        timeoutMs: UPLOAD_TIMEOUT,
       })
 
       if (res.status === 204) {
@@ -81,7 +113,11 @@ export class BrowserSync {
         await this.importCookies(this.getClaudeSession(), data.claude.cookies, 'claude')
       }
       if (data.browser?.cookies?.length) {
-        await this.importCookies(this.getBrowserSession(), data.browser.cookies, 'browser')
+        const browserCookies = filterBrowserSyncCookies(data.browser.cookies)
+        log.info(`[BrowserSync] browser cookies filtered for import: ${data.browser.cookies.length} -> ${browserCookies.length}`)
+        if (browserCookies.length) {
+          await this.importCookies(this.getBrowserSession(), browserCookies, 'browser')
+        }
       }
       if (data.claude?.localStorage && Object.keys(data.claude.localStorage).length > 0) {
         this.pendingLocalStorage = data.claude.localStorage
@@ -141,11 +177,14 @@ export class BrowserSync {
 
     log.info('[BrowserSync] _doUpload start')
     try {
-      // Export both session jars. The browser jar may contain cookies for
-      // many origins (proton.me, github.com, cloudflare, ...) — they all
-      // ride along in the same encrypted blob.
+      await this.ensureAppReady()
+
+      // Export both session jars. The generic browser jar is restricted to
+      // Claude/OpenAI product domains to avoid restoring arbitrary site state.
       const claudeCookies = await this.getClaudeSession().cookies.get({})
-      const browserCookies = await this.getBrowserSession().cookies.get({})
+      const rawBrowserCookies = await this.getBrowserSession().cookies.get({})
+      const browserCookies = filterBrowserSyncCookies(rawBrowserCookies)
+      log.info(`[BrowserSync] browser cookies filtered for upload: ${rawBrowserCookies.length} -> ${browserCookies.length}`)
       const hash = this.hashAll(claudeCookies, browserCookies)
       log.info(
         `[BrowserSync] upload check: claude=${claudeCookies.length} browser=${browserCookies.length} hash=${hash.slice(0, 8)}`,
@@ -174,14 +213,14 @@ export class BrowserSync {
         timestamp: new Date().toISOString(),
       }
 
-      const res = await fetch(buildSubscriptionApiUrl('/api/subscription/browser-data'), {
+      const res = await mainHttpRequest(buildSubscriptionApiUrl('/api/subscription/browser-data'), {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${this.token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(UPLOAD_TIMEOUT),
+        timeoutMs: UPLOAD_TIMEOUT,
       })
 
       if (res.ok) {

@@ -2,11 +2,16 @@ import { app } from 'electron'
 import { platform, release, arch } from 'os'
 import log from './logger'
 import { readFileSync } from 'fs'
+import { mainHttpRequest } from './utils/main-http'
 
 const API_BASE = 'https://llm.inkessai.com'
 const FLUSH_INTERVAL = 60_000
 const QUEUE_LIMIT = 10
 const MAX_QUEUE_SIZE = 200
+
+function isBackgroundNetworkDisabled(): boolean {
+  return process.platform === 'darwin' && process.env.INKESS_ENABLE_MAC_BACKGROUND_NET !== '1'
+}
 
 interface ErrorEntry {
   message: string
@@ -110,10 +115,7 @@ export class ErrorReporter {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
       if (token) headers['Authorization'] = `Bearer ${token}`
 
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 30_000)
-
-      const res = await fetch(`${API_BASE}/api/llm/desktop/client-logs`, {
+      const res = await mainHttpRequest(`${API_BASE}/api/llm/desktop/client-logs`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -122,8 +124,9 @@ export class ErrorReporter {
           version: app.getVersion(),
           platform: process.platform,
         }),
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timer))
+        timeoutMs: 30_000,
+        maxBuffer: 256 * 1024,
+      })
 
       if (!res.ok) {
         return { success: false, error: `HTTP ${res.status}` }
@@ -136,6 +139,7 @@ export class ErrorReporter {
 
   private async flush(): Promise<void> {
     if (this.queue.length === 0 || this.flushing) return
+    if (isBackgroundNetworkDisabled()) return
     this.flushing = true
     const batch = this.queue.splice(0)
     const token = this.tokenGetter?.()
@@ -144,10 +148,7 @@ export class ErrorReporter {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
       if (token) headers['Authorization'] = `Bearer ${token}`
 
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 10_000)
-
-      await fetch(`${API_BASE}/api/llm/desktop/client-logs`, {
+      await mainHttpRequest(`${API_BASE}/api/llm/desktop/client-logs`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -157,8 +158,9 @@ export class ErrorReporter {
           platform: process.platform,
           username: this.usernameGetter?.() || undefined,
         }),
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timer))
+        timeoutMs: 10_000,
+        maxBuffer: 256 * 1024,
+      })
     } catch {
       // Re-queue for retry (cap at MAX_QUEUE_SIZE)
       for (const entry of batch) {
@@ -172,6 +174,7 @@ export class ErrorReporter {
 
   private async flushBiz(): Promise<void> {
     if (this.bizQueue.length === 0 || this.bizFlushing) return
+    if (isBackgroundNetworkDisabled()) return
     this.bizFlushing = true
     const batch = this.bizQueue.splice(0)
     const token = this.tokenGetter?.()
@@ -180,10 +183,7 @@ export class ErrorReporter {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
       if (token) headers['Authorization'] = `Bearer ${token}`
 
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 10_000)
-
-      await fetch(`${API_BASE}/api/llm/desktop/client-logs`, {
+      await mainHttpRequest(`${API_BASE}/api/llm/desktop/client-logs`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -193,8 +193,9 @@ export class ErrorReporter {
           platform: process.platform,
           username: this.usernameGetter?.() || undefined,
         }),
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timer))
+        timeoutMs: 10_000,
+        maxBuffer: 256 * 1024,
+      })
     } catch {
       for (const entry of batch) {
         if (this.bizQueue.length >= MAX_QUEUE_SIZE) break

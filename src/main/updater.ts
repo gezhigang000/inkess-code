@@ -46,12 +46,24 @@ export function onUpdateStatus(cb: (status: UpdateStatus) => void) {
 }
 
 export function checkForAppUpdate() {
+  if (process.platform === 'darwin' && process.env.INKESS_ENABLE_MAC_BACKGROUND_NET !== '1') {
+    log.warn('Check for updates skipped on macOS')
+    statusCallback?.({ type: 'error', message: 'Update check is disabled on macOS while network crash mitigation is active.' })
+    return
+  }
+
   autoUpdater.checkForUpdates().catch((err) => {
     log.error('Check for updates failed:', err)
   })
 }
 
 export function downloadAppUpdate() {
+  if (process.platform === 'darwin' && process.env.INKESS_ENABLE_MAC_BACKGROUND_NET !== '1') {
+    log.warn('Download update skipped on macOS')
+    statusCallback?.({ type: 'error', message: 'Update download is disabled on macOS while network crash mitigation is active.' })
+    return
+  }
+
   autoUpdater.downloadUpdate().catch((err) => {
     log.error('Download update failed:', err)
   })

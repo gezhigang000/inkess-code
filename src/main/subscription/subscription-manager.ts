@@ -6,6 +6,7 @@ import log from '../logger'
 import { getDeviceId } from './device-id'
 import { encrypt, decrypt } from '../utils/crypto'
 import { buildSubscriptionApiUrl } from './api-url'
+import { mainHttpRequest } from '../utils/main-http'
 
 export interface SubscriptionConfig {
   claudeEmail: string
@@ -121,10 +122,7 @@ export class SubscriptionManager {
     const deviceId = getDeviceId()
 
     try {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 15000)
-
-      const res = await fetch(buildSubscriptionApiUrl('/api/subscription/login'), {
+      const res = await mainHttpRequest(buildSubscriptionApiUrl('/api/subscription/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -132,19 +130,19 @@ export class SubscriptionManager {
           deviceName: `${platform()} ${release()} ${arch()}`,
           appVersion: app.getVersion(),
         }),
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timer))
+        timeoutMs: 15000,
+      })
 
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
         return {
           success: false,
-          error: body.message || `Login failed (HTTP ${res.status})`,
-          errorCode: body.error,
+          error: (body as { message?: string }).message || `Login failed (HTTP ${res.status})`,
+          errorCode: (body as { error?: string }).error,
         }
       }
 
-      const data = await res.json()
+      const data = await res.json() as { token: string; config: SubscriptionConfig }
       const config = data.config as SubscriptionConfig
 
       // Validate exitIp — must be a valid IPv4 address, required field
@@ -169,7 +167,7 @@ export class SubscriptionManager {
       return { success: true, config }
     } catch (err) {
       const msg = (err as Error).message
-      if (msg.includes('aborted')) {
+      if (msg.includes('aborted') || msg.includes('timed out')) {
         return { success: false, error: 'Connection timed out. Please check your network.' }
       }
       return { success: false, error: msg }
@@ -183,13 +181,10 @@ export class SubscriptionManager {
     if (!this.session?.token) return null
 
     try {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 10000)
-
-      const res = await fetch(buildSubscriptionApiUrl('/api/subscription/status'), {
+      const res = await mainHttpRequest(buildSubscriptionApiUrl('/api/subscription/status'), {
         headers: { 'Authorization': `Bearer ${this.session.token}` },
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timer))
+        timeoutMs: 10000,
+      })
 
       if (res.status === 401) {
         // Token expired — clear session

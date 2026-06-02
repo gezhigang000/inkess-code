@@ -1,9 +1,15 @@
 import { app } from 'electron'
 import log from './logger'
+import { mainHttpRequest } from './utils/main-http'
 
 const API_BASE = 'https://llm.inkessai.com'
 const FLUSH_INTERVAL = 60_000
 const QUEUE_LIMIT = 20
+const MAX_QUEUE_SIZE = 200
+
+function isBackgroundNetworkDisabled(): boolean {
+  return process.platform === 'darwin' && process.env.INKESS_ENABLE_MAC_BACKGROUND_NET !== '1'
+}
 
 interface AnalyticsEvent {
   event: string
@@ -20,6 +26,8 @@ export class Analytics {
   }
 
   track(event: string, props?: Record<string, unknown>): void {
+    if (isBackgroundNetworkDisabled()) return
+    if (this.queue.length >= MAX_QUEUE_SIZE) this.queue.shift()
     this.queue.push({ event, props, ts: Date.now() })
     if (this.queue.length >= QUEUE_LIMIT) {
       this.flush()
@@ -27,16 +35,14 @@ export class Analytics {
   }
 
   async flush(): Promise<void> {
+    if (isBackgroundNetworkDisabled()) return
     if (this.queue.length === 0) return
     const batch = this.queue.splice(0)
 
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
 
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 10_000)
-
-      await fetch(`${API_BASE}/api/llm/desktop/events`, {
+      await mainHttpRequest(`${API_BASE}/api/llm/desktop/events`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -44,8 +50,8 @@ export class Analytics {
           platform: process.platform,
           version: app.getVersion(),
         }),
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timer))
+        timeoutMs: 10_000,
+      })
     } catch {
       // Silent fail — analytics should never break the app
       log.warn(`Analytics: failed to flush ${batch.length} events`)

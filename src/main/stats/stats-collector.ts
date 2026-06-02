@@ -121,6 +121,11 @@ export class StatsCollector {
   // ── Ping timer ─────────────────────────────────────────────────────────────
 
   private startPingTimer(): void {
+    if (process.platform === 'darwin' && process.env.INKESS_ENABLE_MAC_BACKGROUND_NET !== '1') {
+      log.info('StatsCollector: background ping disabled on macOS')
+      return
+    }
+
     const timer = setInterval(() => void this.doPing(), PING_INTERVAL_MS)
     timer.unref()
     this.pingTimer = timer
