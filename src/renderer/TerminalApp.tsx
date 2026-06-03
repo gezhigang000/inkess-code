@@ -437,6 +437,11 @@ export function TerminalApp() {
   const handleSubscriptionLogin = useCallback(async (config: {
     claudeEmail: string; claudePassword: string; proxyUrl: string; proxyRegion: string; exitIp?: string; expiresAt: string; status: string; plan?: string
   }) => {
+    if (config.status === 'expired' || config.status === 'suspended' || calcMinutesRemaining(config.expiresAt) <= 0) {
+      forceExpiredLogout()
+      return
+    }
+
     setSubscriptionLoggedIn(true)
     setSubscriptionExpiry(config.expiresAt)
     expiryAtRef.current = config.expiresAt
@@ -455,8 +460,11 @@ export function TerminalApp() {
       window.api.claude.setCredentials(config.claudeEmail, config.claudePassword)
     }
 
-    // 3. Start status polling
-    startStatusPolling(config.plan || 'monthly')
+    // 3. Start status polling. Do not run an immediate status check here:
+    // the login response is already authoritative for this transition, and
+    // an immediate check can race with token propagation/server-side session
+    // state and bounce the user back to the login page after TunGate succeeds.
+    startStatusPolling(config.plan || 'monthly', { immediate: false })
 
     // 4. Get username
     const session = await window.api.subscription.getSession()
@@ -527,11 +535,12 @@ export function TerminalApp() {
     return Math.max(0, (new Date(expiresAt).getTime() - Date.now()) / 60000)
   }
 
-  const startStatusPolling = useCallback((plan: string) => {
+  const startStatusPolling = useCallback((plan: string, options: { immediate?: boolean } = {}) => {
     if (statusPollRef.current) return
 
     const isDaily = plan === 'daily'
     const pollInterval = isDaily ? 60000 : 3600000
+    const immediate = options.immediate ?? true
 
     const poll = async () => {
       const status = await window.api.subscription.checkStatus()
@@ -593,8 +602,10 @@ export function TerminalApp() {
       })
     }
 
-    // Initial poll (will correct the seed value with server truth)
-    poll()
+    // Initial poll (will correct the seed value with server truth). The
+    // fresh-login path opts out because the login response has just supplied
+    // the same authoritative account/config state.
+    if (immediate) poll()
     statusPollRef.current = setInterval(poll, pollInterval)
 
     // Local countdown — ticks every 30s, uses expiresAt-based calculation
