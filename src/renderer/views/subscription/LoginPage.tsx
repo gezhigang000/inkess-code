@@ -9,7 +9,7 @@ interface LoginPageProps {
     claudeEmail: string; claudePassword: string
     proxyUrl: string; proxyRegion: string
     expiresAt: string; status: string
-  }) => void
+  }) => void | Promise<void>
 }
 
 function isValidServerUrl(value: string): boolean {
@@ -34,19 +34,24 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
     setLoading(true)
     setError(null)
 
-    const result = await window.api.subscription.login(username, password)
-    setLoading(false)
+    try {
+      const result = await window.api.subscription.login(username, password)
 
-    if (result.success && result.config) {
-      onLoginSuccess(result.config)
-    } else {
-      if (result.errorCode === 'DEVICE_ALREADY_BOUND') {
-        setError(t('subscription.deviceBound'))
-      } else if (result.errorCode === 'ACCOUNT_BOUND_TO_OTHER_DEVICE') {
-        setError(t('subscription.accountBound'))
+      if (result.success && result.config) {
+        await onLoginSuccess(result.config)
       } else {
-        setError(result.error || t('subscription.loginFailed'))
+        if (result.errorCode === 'DEVICE_ALREADY_BOUND') {
+          setError(t('subscription.deviceBound'))
+        } else if (result.errorCode === 'ACCOUNT_BOUND_TO_OTHER_DEVICE') {
+          setError(t('subscription.accountBound'))
+        } else {
+          setError(result.error || t('subscription.loginFailed'))
+        }
       }
+    } catch (err) {
+      setError((err as Error).message || t('subscription.loginFailed'))
+    } finally {
+      setLoading(false)
     }
   }
 

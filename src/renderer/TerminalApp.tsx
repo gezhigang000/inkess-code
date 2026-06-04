@@ -358,7 +358,7 @@ export function TerminalApp() {
       // On 401, main process already called logout() internally (session.json deleted).
       // On network error, session.json is intact. We distinguish by re-checking session.
       const status = await window.api.subscription.checkStatus()
-      if (status && (status.status === 'expired' || status.status === 'suspended')) {
+      if (status && shouldForceSubscriptionLogout(status.status, status.expiresAt)) {
         console.log('[App] session expired/suspended on server, redirecting to login')
         await window.api.subscription.logout()
         setSubscriptionLoggedIn(false)
@@ -437,11 +437,6 @@ export function TerminalApp() {
   const handleSubscriptionLogin = useCallback(async (config: {
     claudeEmail: string; claudePassword: string; proxyUrl: string; proxyRegion: string; exitIp?: string; expiresAt: string; status: string; plan?: string
   }) => {
-    if (config.status === 'expired' || config.status === 'suspended' || calcMinutesRemaining(config.expiresAt) <= 0) {
-      forceExpiredLogout()
-      return
-    }
-
     setSubscriptionLoggedIn(true)
     setSubscriptionExpiry(config.expiresAt)
     expiryAtRef.current = config.expiresAt
@@ -532,7 +527,22 @@ export function TerminalApp() {
 
   /** Compute minutes remaining from expiresAt string */
   const calcMinutesRemaining = (expiresAt: string): number => {
-    return Math.max(0, (new Date(expiresAt).getTime() - Date.now()) / 60000)
+    const expiresAtMs = new Date(expiresAt).getTime()
+    if (!Number.isFinite(expiresAtMs)) return 0
+    return Math.max(0, (expiresAtMs - Date.now()) / 60000)
+  }
+
+  const hasReachedExpiry = (expiresAt: string | null | undefined): boolean => {
+    if (!expiresAt) return true
+    const expiresAtMs = new Date(expiresAt).getTime()
+    if (!Number.isFinite(expiresAtMs)) return true
+    return expiresAtMs <= Date.now()
+  }
+
+  const shouldForceSubscriptionLogout = (status: string | null | undefined, expiresAt: string | null | undefined): boolean => {
+    if (status === 'suspended') return true
+    if (status === 'expired') return hasReachedExpiry(expiresAt)
+    return false
   }
 
   const startStatusPolling = useCallback((plan: string, options: { immediate?: boolean } = {}) => {
@@ -559,7 +569,7 @@ export function TerminalApp() {
       expiryAtRef.current = status.expiresAt
       if (status.plan) setSubscriptionPlan(status.plan)
 
-      if (status.status === 'expired' || status.status === 'suspended') {
+      if (shouldForceSubscriptionLogout(status.status, status.expiresAt)) {
         forceExpiredLogout()
         return
       }
@@ -622,7 +632,7 @@ export function TerminalApp() {
         const msRemaining = new Date(expiresAt).getTime() - Date.now()
         if (msRemaining <= 0) {
           const status = await window.api.subscription.checkStatus()
-          if (status && (status.status === 'expired' || status.status === 'suspended')) {
+          if (status && shouldForceSubscriptionLogout(status.status, status.expiresAt)) {
             forceExpiredLogout()
           } else if (status) {
             setExpiryMinutesRemaining(calcMinutesRemaining(status.expiresAt))
